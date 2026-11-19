@@ -1,0 +1,9 @@
+node_modules/
+.npm-cache/
+dist/
+release/
+test-results/
+playwright-report/
+build/
+*.tsbuildinfo
+package-lock.json

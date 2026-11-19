@@ -1,0 +1,85 @@
+{
+  "name": "stordock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A considered, cross-platform workspace for object storage.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "desktop": "node scripts/desktop.mjs",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "preview": "vite preview --host 127.0.0.1",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:package": "node scripts/smoke-package.mjs"
+  },
+  "dependencies": {
+    "ali-oss": "6.23.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "electron": "45.4.1",
+    "electron-builder": "^26.0.12",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^4.0.8"
+  },
+  "build": {
+    "appId": "io.stordock.client",
+    "productName": "StorDock",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "build/icon.png"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": true
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    },
+    "icon": "build/icon.png"
+  },
+  "overrides": {
+    "minimatch@^10.2.5": "^11.0.9",
+    "minimatch@^9.0.3": "^11.0.9"
+  },
+  "author": "nohawu",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
