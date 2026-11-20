@@ -15,6 +15,7 @@ const {
 } = require('../electron/core.cjs');
 const { ConnectionVault } = require('../electron/vault.cjs');
 const { AliyunProvider, friendlyError } = require('../electron/oss.cjs');
+const { taskManager } = require('../electron/tasks.cjs');
 const input = {
   name: 'Test',
   region: 'oss-cn-hangzhou',
@@ -30,6 +31,7 @@ async function tempDir() {
   return p;
 }
 afterEach(async () => {
+  taskManager.clear();
   for (const p of temporary.splice(0)) {
     if (
       path.dirname(p) !== path.resolve(os.tmpdir()) ||
@@ -38,6 +40,70 @@ afterEach(async () => {
       throw new Error('Invalid test cleanup path');
     await fs.rm(p, { recursive: true, force: true });
   }
+});
+
+describe('transfer safety and connection edits', () => {
+  it('refuses conditional writes when OSS versioning makes no-overwrite ineffective', async () => {
+    let writes = 0;
+    const provider = new AliyunProvider(() => ({
+      getBucketVersioning: async () => ({ versionStatus: 'Enabled' }),
+      put: async () => {
+        writes++;
+      },
+    }));
+    await expect(
+      provider.createFolder({ provider: 'aliyun' }, 'bucket', '', 'folder'),
+    ).rejects.toThrow('版本控制');
+    await expect(
+      provider.upload({ provider: 'aliyun' }, 'bucket', '', [], () => {}),
+    ).rejects.toThrow('版本控制');
+    expect(writes).toBe(0);
+  });
+  it('never replays a task against a changed connection target', async () => {
+    const provider = new AliyunProvider(() => ({}));
+    const connection = {
+      id: 'edited',
+      provider: 's3',
+      endpoint: 'https://original.example',
+      bucket: 'bucket',
+    };
+    provider.resolveConnection = async () => ({
+      ...connection,
+      endpoint: 'https://changed.example',
+    });
+    await expect(provider.refreshConnection(connection, 'bucket')).rejects.toThrow(
+      '连接目标已更改',
+    );
+  });
+  it('cancels a streaming download, removes its partial file and retries successfully', async () => {
+    const dir = await tempDir();
+    const destination = path.join(dir, 'download.txt');
+    const provider = new AliyunProvider(() => ({
+      getStream: async () => ({
+        stream: Readable.from([Buffer.from('retry stream')]),
+        res: { headers: { 'content-length': '12' } },
+      }),
+    }));
+    let cancel = true,
+      id = '';
+    await provider.download(
+      { id: 'test', provider: 'aliyun' },
+      'bucket',
+      [{ key: 'file.txt', size: 12 }],
+      destination,
+      (task: any) => {
+        id = task.id;
+        if (cancel && task.progress > 0 && task.status === 'running') {
+          cancel = false;
+          taskManager.cancel(id);
+        }
+      },
+    );
+    expect(taskManager.records.get(id).metadata.status).toBe('cancelled');
+    expect(await fs.readdir(dir)).toEqual([]);
+    expect((await taskManager.retry(id)).status).toBe('completed');
+    expect(await fs.readFile(destination, 'utf8')).toBe('retry stream');
+  });
 });
 describe('connection and path boundaries', () => {
   it('normalizes region and excludes secret credentials from renderer metadata', () => {

@@ -10,6 +10,7 @@ import type {
   UploadItem,
 } from '../types';
 import { folderNameError } from './objects';
+import { DemoTasks } from './transfers';
 
 export const DEMO_ID = 'demo-studio';
 export const demoConnection: Connection = {
@@ -174,9 +175,47 @@ function persist() {
 }
 const emit = (transfer: Transfer) => listeners.forEach((l) => l({ ...transfer }));
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const tasks = new DemoTasks(emit);
+const plans = new Map<
+  string,
+  {
+    bucket: string;
+    operation: 'copy' | 'move' | 'rename' | 'delete';
+    entries: DemoEntry[];
+    targets: string[];
+  }
+>();
+function selectedEntries(bucket: string, objects: StorageObject[]) {
+  return data[bucket].filter((entry) =>
+    objects.some(
+      (object) =>
+        entry.key === object.key || (object.kind === 'folder' && entry.key.startsWith(object.key)),
+    ),
+  );
+}
+function ensureDemoFolders(bucket: string, key: string) {
+  const parts = key.replace(/\/$/, '').split('/');
+  parts.pop();
+  let prefix = '';
+  for (const part of parts) {
+    prefix += part + '/';
+    if (!data[bucket].some((entry) => entry.key === prefix)) data[bucket].push(folder(prefix));
+  }
+}
 export const demo: Pick<
   StorageBridge,
-  'buckets' | 'list' | 'preview' | 'upload' | 'download' | 'createFolder' | 'onTransfer'
+  | 'buckets'
+  | 'list'
+  | 'preview'
+  | 'upload'
+  | 'download'
+  | 'createFolder'
+  | 'onTransfer'
+  | 'prepareOperation'
+  | 'executeOperation'
+  | 'cancelTransfer'
+  | 'retryTransfer'
+  | 'clearTransfers'
 > = {
   async buckets(): Promise<Bucket[]> {
     return Object.keys(data).map((name) => ({ name, region: 'cn-hangzhou' }));
@@ -221,94 +260,220 @@ export const demo: Pick<
     data[bucket].push(folder(key));
     persist();
   },
-  async upload(_id, bucket, prefix, items) {
+  async upload(_id, bucket, prefix, items, conflict = 'reject') {
+    const summary = { completed: 0, failed: 0, skipped: 0, cancelled: 0 };
     for (const item of items) {
-      const t: Transfer = {
-        id: crypto.randomUUID(),
-        name: item.name,
-        size: item.file?.size || 0,
-        bucket,
-        direction: 'upload',
-        status: 'running',
-        progress: 0,
-        startedAt: Date.now(),
-      };
-      emit(t);
-      try {
-        if (!item.file) throw new Error('演示空间请通过浏览器选择文件');
-        if (item.file.size > 2_000_000)
-          throw new Error('演示空间单文件限制为 2 MB，真实 OSS 不受此限制');
-        const key = `${prefix}${item.name}`;
-        if (data[bucket].some((o) => o.key === key))
-          throw new Error('同名文件已存在，本次上传未覆盖');
-        const content = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = reject;
-          reader.onload = () => resolve(reader.result as string);
-          reader.readAsDataURL(item.file!);
-        });
-        for (const progress of [25, 60, 100]) {
-          await pause(110);
-          emit({ ...t, progress });
-        }
-        const mime = item.file.type;
-        const textFile =
-          /^(text\/|application\/(json|xml|javascript))/.test(mime) ||
-          /\.(md|txt|json|csv|log|yaml|yml)$/i.test(item.name);
-        const entry = file(
-          key,
-          item.file.size,
-          textFile ? await item.file.text() : content,
-          textFile ? 'text/plain' : mime,
-          new Date().toISOString(),
-        );
-        data[bucket].push(entry);
-        try {
-          persist();
-        } catch (e) {
-          data[bucket].pop();
-          throw e;
-        }
-        emit({ ...t, status: 'completed', progress: 100 });
-      } catch (e) {
-        emit({ ...t, status: 'failed', error: e instanceof Error ? e.message : '上传失败' });
-      }
+      const result = await tasks.run(
+        {
+          name: item.relativePath || item.name,
+          size: item.file?.size || 0,
+          bucket,
+          direction: 'upload',
+        },
+        async (signal, report) => {
+          signal.throwIfAborted();
+          if (item.directory) {
+            const key = prefix + item.relativePath;
+            if (!data[bucket].some((entry) => entry.key === key)) {
+              ensureDemoFolders(bucket, key);
+              data[bucket].push(folder(key));
+              persist();
+            }
+            return;
+          }
+          if (!item.file) throw new Error('演示空间请通过浏览器选择文件');
+          if (item.file.size > 2_000_000)
+            throw new Error('演示空间单文件限制为 2 MB，真实 OSS 不受此限制');
+          let key = `${prefix}${item.relativePath || item.name}`;
+          if (
+            /[\\\x00-\x1f]/.test(key) ||
+            key.split('/').some((part) => !part || part === '.' || part === '..')
+          )
+            throw new Error('文件相对路径无效');
+          if (data[bucket].some((o) => o.key === key)) {
+            if (conflict === 'skip') return 'skipped';
+            if (conflict === 'rename') {
+              const original = key;
+              const slash = key.lastIndexOf('/');
+              const dot = key.lastIndexOf('.');
+              const split = dot > slash + 1 ? dot : key.length;
+              let index = 1;
+              do {
+                key = `${original.slice(0, split)} (${index++})${original.slice(split)}`;
+              } while (data[bucket].some((o) => o.key === key));
+            } else if (conflict !== 'overwrite') throw new Error('同名文件已存在，本次上传未覆盖');
+          }
+          const content = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = reject;
+            reader.onload = () => resolve(reader.result as string);
+            reader.readAsDataURL(item.file!);
+          });
+          for (const progress of [25, 60, 100]) {
+            await pause(110);
+            signal.throwIfAborted();
+            report({ progress });
+          }
+          const mime = item.file.type;
+          const textFile =
+            /^(text\/|application\/(json|xml|javascript))/.test(mime) ||
+            /\.(md|txt|json|csv|log|yaml|yml)$/i.test(item.name);
+          const entry = file(
+            key,
+            item.file.size,
+            textFile ? await item.file.text() : content,
+            textFile ? 'text/plain' : mime,
+            new Date().toISOString(),
+          );
+          const previous = [...data[bucket]];
+          data[bucket] = data[bucket].filter((object) => object.key !== key);
+          ensureDemoFolders(bucket, key);
+          data[bucket].push(entry);
+          try {
+            persist();
+          } catch (e) {
+            data[bucket] = previous;
+            throw e;
+          }
+        },
+      );
+      if (
+        result.status === 'completed' ||
+        result.status === 'failed' ||
+        result.status === 'skipped' ||
+        result.status === 'cancelled'
+      )
+        summary[result.status]++;
     }
+    return summary;
   },
   async download(_id, bucket, objects) {
-    for (const object of objects) {
-      const t: Transfer = {
-        id: crypto.randomUUID(),
-        name: object.name,
-        size: object.size,
-        bucket,
-        direction: 'download',
-        status: 'running',
-        progress: 0,
-        startedAt: Date.now(),
-      };
-      emit(t);
-      try {
-        const entry = data[bucket].find((o) => o.key === object.key);
-        if (!entry || entry.content === undefined) throw new Error('此文件没有可下载内容');
-        const blob = entry.content.startsWith('data:')
-          ? new Blob([Uint8Array.from(atob(entry.content.split(',')[1]), (c) => c.charCodeAt(0))], {
-              type: entry.mime,
-            })
-          : new Blob([entry.content], { type: entry.mime || 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = object.key.split('/').pop()!;
-        anchor.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-        await pause(200);
-        emit({ ...t, status: 'completed', progress: 100 });
-      } catch (e) {
-        emit({ ...t, status: 'failed', error: e instanceof Error ? e.message : '下载失败' });
-      }
+    for (const object of selectedEntries(bucket, objects).filter(
+      (entry) => entry.kind === 'file',
+    )) {
+      await tasks.run(
+        { name: object.name, size: object.size, bucket, direction: 'download' },
+        async (signal) => {
+          await pause(200);
+          signal.throwIfAborted();
+          const entry = data[bucket].find((o) => o.key === object.key);
+          if (!entry || entry.content === undefined) throw new Error('此文件没有可下载内容');
+          const blob = entry.content.startsWith('data:')
+            ? new Blob(
+                [Uint8Array.from(atob(entry.content.split(',')[1]), (c) => c.charCodeAt(0))],
+                {
+                  type: entry.mime,
+                },
+              )
+            : new Blob([entry.content], { type: entry.mime || 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = object.key.split('/').pop()!;
+          anchor.click();
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        },
+      );
     }
   },
+  async prepareOperation(_id, bucket, objects, operation, target = '') {
+    if (!['copy', 'move', 'rename', 'delete'].includes(operation)) throw new Error('操作无效');
+    if (operation === 'rename' && objects.length !== 1) throw new Error('每次只能重命名一项');
+    if (
+      operation !== 'delete' &&
+      (target.startsWith('/') ||
+        /[\\\x00-\x1f]/.test(target) ||
+        target.split('/').some((part) => part === '.' || part === '..'))
+    )
+      throw new Error('目标路径无效');
+    const roots = objects.filter(
+      (object) =>
+        !objects.some(
+          (other) =>
+            other.kind === 'folder' && other.key !== object.key && object.key.startsWith(other.key),
+        ),
+    );
+    const entries = selectedEntries(bucket, roots).map((entry) => ({ ...entry }));
+    const targets = entries.map((entry) => {
+      const root = roots.find(
+        (object) =>
+          entry.key === object.key ||
+          (object.kind === 'folder' && entry.key.startsWith(object.key)),
+      )!;
+      const base =
+        operation === 'rename'
+          ? target
+          : target +
+            root.key.replace(/\/$/, '').split('/').pop() +
+            (root.kind === 'folder' ? '/' : '');
+      if (
+        operation !== 'delete' &&
+        (base === root.key || (root.kind === 'folder' && base.startsWith(root.key)))
+      )
+        throw new Error('目标不能是原路径或源文件夹的子目录');
+      return base + entry.key.slice(root.key.length);
+    });
+    if (operation !== 'delete' && new Set(targets).size !== targets.length)
+      throw new Error('目标名称重复，请分开操作');
+    const id = `demo-plan-${crypto.randomUUID()}`;
+    if (plans.size >= 20) plans.delete(plans.keys().next().value!);
+    plans.set(id, { bucket, operation, entries, targets });
+    return { id, count: entries.length, size: entries.reduce((sum, entry) => sum + entry.size, 0) };
+  },
+  async executeOperation(id) {
+    const plan = plans.get(id);
+    plans.delete(id);
+    if (!plan) throw new Error('确认已过期，请重新操作');
+    const { bucket, operation, entries, targets } = plan;
+    return tasks.run(
+      {
+        name: `${operation === 'delete' ? '删除' : operation === 'copy' ? '复制' : '移动'} ${entries.length} 个对象`,
+        direction: operation === 'rename' ? 'move' : operation,
+        bucket,
+        size: entries.reduce((sum, entry) => sum + entry.size, 0),
+      },
+      async (signal, report) => {
+        await pause(150);
+        signal.throwIfAborted();
+        for (let index = 0; index < entries.length; index++) {
+          const source = data[bucket].find((entry) => entry.key === entries[index].key);
+          if (
+            !source ||
+            source.content !== entries[index].content ||
+            source.lastModified !== entries[index].lastModified
+          )
+            throw new Error('源对象已变化，请刷新后重新操作');
+          if (operation !== 'delete' && data[bucket].some((entry) => entry.key === targets[index]))
+            throw new Error('目标已存在，未覆盖；源对象保留');
+        }
+        const previous = [...data[bucket]];
+        if (operation !== 'copy')
+          data[bucket] = data[bucket].filter(
+            (entry) => !entries.some((source) => source.key === entry.key),
+          );
+        if (operation !== 'delete')
+          entries.forEach((entry, index) => {
+            ensureDemoFolders(bucket, targets[index]);
+            data[bucket].push({
+              ...entry,
+              key: targets[index],
+              name: targets[index].replace(/\/$/, '').split('/').pop()!,
+              lastModified: new Date().toISOString(),
+            });
+          });
+        try {
+          persist();
+          report({ progress: 100 });
+        } catch (error) {
+          data[bucket] = previous;
+          throw error;
+        }
+      },
+    );
+  },
+  cancelTransfer: (id) => tasks.cancel(id),
+  retryTransfer: (id) => tasks.retry(id),
+  clearTransfers: () => tasks.clear(),
   onTransfer(listener) {
     listeners.add(listener);
     return () => {

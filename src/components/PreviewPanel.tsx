@@ -1,48 +1,147 @@
-import { Check, Copy, Download, Eye, FileQuestion, Loader2, X } from 'lucide-react';
-import { useState } from 'react';
+import {
+  Check,
+  Copy,
+  Download,
+  Eye,
+  FileQuestion,
+  Files,
+  Loader2,
+  RefreshCw,
+  X,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
 import type { Preview, StorageObject } from '../types';
 import { dateLabel, extension, formatBytes } from '../lib/objects';
 import { ObjectIcon } from './ObjectIcon';
 export function PreviewPanel({
   object,
+  selection,
   preview,
   loading,
   error,
   onClose,
   onDownload,
   bucket,
+  downloadBusy,
+  onRetry,
+  onCopyError,
+  previewVersion,
 }: {
   object?: StorageObject;
+  selection: StorageObject[];
   preview?: Preview;
   loading: boolean;
   error?: string;
   onClose(): void;
   onDownload(): void;
   bucket: string;
+  downloadBusy: boolean;
+  onRetry(): void;
+  onCopyError(): void;
+  previewVersion: number;
 }) {
   const [tab, setTab] = useState<'preview' | 'info'>('preview');
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState('');
+  useEffect(() => {
+    setTab('preview');
+  }, [previewVersion]);
+  const single = selection.length === 1 ? selection[0] : undefined;
+  const selectedFiles = selection.filter((item) => item.kind === 'file');
   async function copy() {
     try {
-      await navigator.clipboard.writeText(object!.key);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {}
+      await navigator.clipboard.writeText(single!.key);
+      setCopied(single!.key);
+      setTimeout(() => setCopied(''), 1800);
+    } catch {
+      onCopyError();
+    }
   }
   return (
     <aside className="inspector" aria-label="文件预览">
       <div className="inspector-heading">
-        <strong>文件详情</strong>
+        <strong>
+          <Eye size={14} /> 文件详情
+        </strong>
         <button className="icon-button" aria-label="关闭预览" onClick={onClose}>
           <X size={16} />
         </button>
       </div>
-      {!object ? (
+      {selection.length > 1 ? (
+        <>
+          <div className="inspector-selection">
+            <Files size={30} strokeWidth={1.3} />
+            <h3>已选择 {selection.length} 项</h3>
+            <p>
+              {selectedFiles.length} 个文件 · {selection.length - selectedFiles.length} 个文件夹
+            </p>
+          </div>
+          <div className="metadata">
+            <div className="section-label">选择摘要</div>
+            <dl>
+              <div>
+                <dt>文件总大小</dt>
+                <dd>{formatBytes(selectedFiles.reduce((sum, item) => sum + item.size, 0))}</dd>
+              </div>
+              <div>
+                <dt>存储桶</dt>
+                <dd>{bucket}</dd>
+              </div>
+            </dl>
+            <p className="selection-note">大小仅统计所选文件，不包含文件夹内的内容。</p>
+          </div>
+          <div className="inspector-footer">
+            <button
+              className="button secondary"
+              disabled={downloadBusy || !selection.length}
+              onClick={onDownload}
+            >
+              <Download size={15} />
+              下载所选 ({selection.length})
+            </button>
+          </div>
+        </>
+      ) : single?.kind === 'folder' ? (
+        <>
+          <div className="inspector-file">
+            <ObjectIcon object={single} size={28} />
+            <h3>{single.name}</h3>
+            <span>文件夹</span>
+          </div>
+          <div className="metadata">
+            <div className="section-label">对象信息</div>
+            <dl>
+              <div>
+                <dt>存储桶</dt>
+                <dd>{bucket}</dd>
+              </div>
+            </dl>
+            <div className="path-label">
+              对象路径
+              <button
+                className="icon-button"
+                aria-label="复制对象路径"
+                title={copied === single.key ? '已复制' : '复制对象路径'}
+                onClick={copy}
+              >
+                {copied === single.key ? <Check size={13} /> : <Copy size={13} />}
+              </button>
+            </div>
+            <code className="object-path">{single.key}</code>
+            <p className="selection-note">双击文件夹或按 Enter 进入。</p>
+          </div>
+          <div className="inspector-footer">
+            <button className="button secondary" disabled={downloadBusy} onClick={onDownload}>
+              <Download size={15} />
+              下载文件夹
+            </button>
+          </div>
+        </>
+      ) : !object ? (
         <div className="inspector-empty">
           <span className="empty-preview-icon">
             <Eye size={28} strokeWidth={1.2} />
           </span>
-          <h3>每个文件，都有细节</h3>
+          <h3>未选择文件</h3>
           <p>
             选择一个文件，即可查看
             <br />
@@ -78,6 +177,10 @@ export function PreviewPanel({
                 <div className="preview-placeholder error-text">
                   <FileQuestion size={28} />
                   <p>{error}</p>
+                  <button className="button secondary" onClick={onRetry}>
+                    <RefreshCw size={14} />
+                    重新预览
+                  </button>
                 </div>
               ) : preview?.kind === 'image' ? (
                 <>
@@ -124,10 +227,10 @@ export function PreviewPanel({
               <button
                 className="icon-button"
                 onClick={copy}
-                title={copied ? '已复制' : '复制对象路径'}
+                title={copied === object.key ? '已复制' : '复制对象路径'}
                 aria-label="复制对象路径"
               >
-                {copied ? <Check size={13} /> : <Copy size={13} />}
+                {copied === object.key ? <Check size={13} /> : <Copy size={13} />}
               </button>
             </div>
             <code className="object-path">{object.key}</code>
@@ -139,7 +242,7 @@ export function PreviewPanel({
             )}
           </div>
           <div className="inspector-footer">
-            <button className="button secondary" onClick={onDownload}>
+            <button className="button secondary" disabled={downloadBusy} onClick={onDownload}>
               <Download size={15} />
               下载文件
             </button>

@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import {
   ArrowRight,
+  Box,
   Check,
   CheckCircle2,
   CircleHelp,
@@ -17,10 +18,13 @@ import type { Connection, ConnectionInput } from '../types';
 export function ConnectionDialog({
   onClose,
   onSaved,
+  connection,
 }: {
   onClose(): void;
   onSaved(connection: Connection): void;
+  connection?: Connection;
 }) {
+  const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState<ConnectionInput>({
     name: '',
     provider: 'aliyun',
@@ -30,31 +34,54 @@ export function ConnectionDialog({
     accessKeyId: '',
     accessKeySecret: '',
     stsToken: '',
+    forcePathStyle: true,
+    allowInsecure: false,
     remember: true,
+    ...connection,
+    keepCredentials: !!connection,
+    ...(connection ? { remember: !connection.temporary } : {}),
   });
   const [busy, setBusy] = useState<'test' | 'save' | null>(null);
   const [result, setResult] = useState<{ error?: string; success?: string }>({});
   const [advanced, setAdvanced] = useState(false);
+  const isS3 = form.provider === 's3';
+  const isHttp = /^http:/i.test(form.endpoint.trim());
   function update<K extends keyof ConnectionInput>(key: K, value: ConnectionInput[K]) {
     setForm((f) => ({ ...f, [key]: value }));
     setResult({});
   }
+  function chooseProvider(provider: Connection['provider']) {
+    if (provider === form.provider) return;
+    setForm((f) => ({
+      ...f,
+      provider,
+      region: provider === 's3' ? 'us-east-1' : 'cn-hangzhou',
+      endpoint: '',
+      forcePathStyle: true,
+      allowInsecure: false,
+    }));
+    setResult({});
+    setAdvanced(false);
+  }
   async function execute(action: 'test' | 'save', event?: FormEvent) {
     event?.preventDefault();
+    if (!formRef.current?.reportValidity()) return;
+    if (isS3 && isHttp && !form.allowInsecure) {
+      setResult({ error: '此 Endpoint 使用 HTTP，请显式勾选“允许 HTTP 连接”后再继续' });
+      return;
+    }
     setBusy(action);
     setResult({});
     try {
       if (action === 'test') {
-        const result = await storage.testConnection(form);
-        setResult({ success: `连接成功，可访问 ${result.buckets.length} 个存储桶` });
-      } else {
-        onSaved(await storage.saveConnection(form));
-      }
-    } catch (e) {
+        const response = await storage.testConnection(form);
+        setResult({ success: `连接成功，可访问 ${response.buckets.length} 个存储桶` });
+      } else onSaved(await storage.saveConnection(form));
+    } catch (error) {
       setResult({
         error:
-          e instanceof Error
-            ? e.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
+          error instanceof Error
+            ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
             : '连接失败，请重试',
       });
     } finally {
@@ -63,28 +90,58 @@ export function ConnectionDialog({
   }
   return (
     <Modal
-      title="新建存储连接"
-      subtitle="让云端资源，触手可及。"
+      title={connection ? '编辑存储连接' : '新建存储连接'}
+      subtitle={
+        connection
+          ? '密钥留空保留原凭据；修改账号或服务类型后需要重新填写'
+          : '选择存储类型，配置服务地址和访问凭据'
+      }
       onClose={() => !busy && onClose()}
       wide
     >
-      <form onSubmit={(e) => execute('save', e)}>
-        <div className="provider-option">
-          <span className="aliyun-logo">
-            <Cloud size={23} />
-          </span>
-          <div>
-            <strong>阿里云 OSS</strong>
-            <small>Alibaba Cloud Object Storage</small>
-          </div>
-          <span className="provider-check">
-            <Check size={15} />
-          </span>
+      <form ref={formRef} onSubmit={(event) => execute('save', event)}>
+        <div className="provider-options" role="group" aria-label="存储类型">
+          <button
+            type="button"
+            className="provider-option provider-tile"
+            aria-label="阿里云 OSS"
+            aria-pressed={!isS3}
+            disabled={!!busy}
+            onClick={() => chooseProvider('aliyun')}
+          >
+            <span className="aliyun-logo">
+              <Cloud size={22} />
+            </span>
+            <span>
+              <strong>阿里云 OSS</strong>
+              <small>Alibaba Cloud</small>
+            </span>
+            <span className="provider-check">{!isS3 && <Check size={12} />}</span>
+          </button>
+          <button
+            type="button"
+            className="provider-option provider-tile"
+            aria-label="S3 兼容"
+            aria-pressed={isS3}
+            disabled={!!busy}
+            onClick={() => chooseProvider('s3')}
+          >
+            <span className="s3-logo">
+              <Box size={22} />
+            </span>
+            <span>
+              <strong>S3 兼容</strong>
+              <small>自定义 S3 API 服务</small>
+            </span>
+            <span className="provider-check">{isS3 && <Check size={12} />}</span>
+          </button>
         </div>
         {!window.ossDesk && (
           <div className="form-notice">
-            <CircleHelp size={17} />
-            <span>当前为浏览器演示。连接真实 OSS，请在桌面客户端中打开（npm run desktop）。</span>
+            <CircleHelp size={16} />
+            <span>
+              当前为浏览器演示。连接真实存储服务，请在桌面客户端中打开（npm run desktop）。
+            </span>
           </div>
         )}
         <fieldset disabled={!!busy}>
@@ -99,24 +156,62 @@ export function ConnectionDialog({
               onChange={(e) => update('name', e.target.value)}
             />
           </label>
+          {isS3 && (
+            <>
+              <label className="field">
+                Endpoint
+                <input
+                  required
+                  type="url"
+                  spellCheck={false}
+                  aria-label="Endpoint"
+                  aria-describedby="s3-endpoint-help"
+                  placeholder="https://s3.example.com 或 http://127.0.0.1:9000"
+                  value={form.endpoint}
+                  onChange={(e) => update('endpoint', e.target.value)}
+                />
+                <small className="field-help" id="s3-endpoint-help">
+                  填写 S3 API 地址，支持端口和反向代理路径；不要填写管理控制台地址。
+                </small>
+              </label>
+              <label className="field">
+                访问方式
+                <select
+                  aria-label="访问方式"
+                  value={form.forcePathStyle === false ? 'virtual' : 'path'}
+                  onChange={(e) => update('forcePathStyle', e.target.value === 'path')}
+                >
+                  <option value="path">Path-style · endpoint/bucket/key</option>
+                  <option value="virtual">虚拟主机 · bucket.endpoint/key</option>
+                </select>
+              </label>
+            </>
+          )}
           <div className="form-grid">
             <label className="field">
-              地域 Region
+              {isS3 ? 'Region' : '地域 Region'}
               <input
                 required
                 list="regions"
-                placeholder="cn-hangzhou"
+                placeholder={isS3 ? 'us-east-1' : 'cn-hangzhou'}
                 value={form.region}
                 onChange={(e) => update('region', e.target.value)}
               />
               <datalist id="regions">
-                <option value="cn-hangzhou" />
-                <option value="cn-shanghai" />
-                <option value="cn-beijing" />
-                <option value="cn-shenzhen" />
-                <option value="cn-hongkong" />
-                <option value="ap-southeast-1" />
-                <option value="us-west-1" />
+                {(isS3
+                  ? ['us-east-1', 'us-west-2', 'ap-southeast-1', 'eu-west-1', 'auto']
+                  : [
+                      'cn-hangzhou',
+                      'cn-shanghai',
+                      'cn-beijing',
+                      'cn-shenzhen',
+                      'cn-hongkong',
+                      'ap-southeast-1',
+                      'us-west-1',
+                    ]
+                ).map((r) => (
+                  <option key={r} value={r} />
+                ))}
               </datalist>
             </label>
             <label className="field">
@@ -130,55 +225,98 @@ export function ConnectionDialog({
           </div>
           <label className="field">
             <span>
-              <KeyRound size={13} /> AccessKey ID
+              <KeyRound size={13} /> {isS3 ? 'Access Key ID' : 'AccessKey ID'}
             </span>
             <input
               required
               autoComplete="off"
               spellCheck={false}
-              placeholder="输入 AccessKey ID"
+              placeholder={isS3 ? '输入 Access Key ID' : '输入 AccessKey ID'}
               value={form.accessKeyId}
               onChange={(e) => update('accessKeyId', e.target.value)}
             />
           </label>
           <label className="field">
             <span>
-              <LockKeyhole size={13} /> AccessKey Secret
+              <LockKeyhole size={13} /> {isS3 ? 'Secret Access Key' : 'AccessKey Secret'}
             </span>
             <input
-              required
+              required={
+                !connection ||
+                form.provider !== connection.provider ||
+                form.accessKeyId !== connection.accessKeyId
+              }
               autoComplete="new-password"
               type="password"
-              placeholder="输入 AccessKey Secret"
+              placeholder={
+                connection
+                  ? '留空保留原密钥'
+                  : isS3
+                    ? '输入 Secret Access Key'
+                    : '输入 AccessKey Secret'
+              }
               value={form.accessKeySecret}
               onChange={(e) => update('accessKeySecret', e.target.value)}
             />
           </label>
-          <button type="button" className="advanced-toggle" onClick={() => setAdvanced((v) => !v)}>
+          {isS3 && (
+            <label className={`http-optin ${isHttp ? 'is-http' : ''}`}>
+              <input
+                type="checkbox"
+                checked={!!form.allowInsecure}
+                onChange={(e) => update('allowInsecure', e.target.checked)}
+              />
+              <span>
+                允许 HTTP 连接（未加密）<small>仅在自建服务未启用 HTTPS 时使用</small>
+              </span>
+            </label>
+          )}
+          <button
+            type="button"
+            className="advanced-toggle"
+            aria-label={advanced ? '收起高级配置' : '高级配置'}
+            aria-expanded={advanced}
+            onClick={() => setAdvanced((v) => !v)}
+          >
             <Server size={14} />
             {advanced ? '收起高级配置' : '高级配置'}
             <span>{advanced ? '−' : '+'}</span>
           </button>
           {advanced && (
             <div className="advanced-fields">
+              {!isS3 && (
+                <label className="field">
+                  自定义 Endpoint
+                  <input
+                    type="url"
+                    spellCheck={false}
+                    placeholder="https://oss-cn-hangzhou.aliyuncs.com"
+                    value={form.endpoint}
+                    onChange={(e) => update('endpoint', e.target.value)}
+                  />
+                </label>
+              )}
               <label className="field">
-                自定义 Endpoint
-                <input
-                  type="url"
-                  placeholder="https://oss-cn-hangzhou.aliyuncs.com"
-                  value={form.endpoint}
-                  onChange={(e) => update('endpoint', e.target.value)}
-                />
-              </label>
-              <label className="field">
-                STS Token <span className="optional">可选</span>
+                {isS3 ? 'Session Token' : 'STS Token'} <span className="optional">可选</span>
                 <textarea
                   rows={2}
-                  placeholder="使用临时凭据时填写，过期后需要重新连接"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={connection ? '留空保留原 Token；填写以替换' : '使用临时凭据时填写'}
                   value={form.stsToken}
                   onChange={(e) => update('stsToken', e.target.value)}
                 />
               </label>
+              {connection && (
+                <label className="remember-field">
+                  <input
+                    type="checkbox"
+                    checked={!!form.clearStsToken}
+                    onChange={(e) => update('clearStsToken', e.target.checked)}
+                  />
+                  清除已保存的 Token
+                </label>
+              )}
             </div>
           )}
           <label className="remember-field">

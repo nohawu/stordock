@@ -11,6 +11,7 @@ try {
   await expect(
     page.getByRole('button', { name: 'cover-landscape.svg', exact: true }),
   ).toBeVisible();
+  await page.getByRole('button', { name: 'cover-landscape.svg', exact: true }).dblclick();
   await expect(page.locator('.image-preview img')).toBeVisible();
   const state = await app.evaluate(({ app }) => ({ packaged: app.isPackaged }));
   if (!state.packaged) throw new Error('Expected a packaged application');

@@ -29,6 +29,7 @@ OSS.prototype.listV2 = async function (query = {}) {
 OSS.prototype.head = async (key) => ({
   res: { headers: { 'content-length': content.get(key).length } },
 });
+OSS.prototype.getBucketVersioning = async () => ({ versionStatus: undefined });
 OSS.prototype.getStream = async (key) => ({
   stream: Readable.from([content.get(key)]),
   res: { headers: { 'content-length': content.get(key).length } },
@@ -37,9 +38,18 @@ OSS.prototype.put = async (key, file) => {
   if (content.has(key)) throw Object.assign(new Error('existing'), { code: 'FileAlreadyExists' });
   content.set(key, Buffer.isBuffer(file) ? file : await fs.readFile(file));
 };
-dialog.showOpenDialog = async () => ({
+dialog.showOpenDialog = async (_window, options) => ({
   canceled: false,
-  filePaths: [path.join(process.env.OSS_DESK_TEST_DATA, 'upload-fixture.txt')],
+  filePaths: [
+    path.join(
+      process.env.OSS_DESK_TEST_DATA,
+      options.properties.includes('openDirectory')
+        ? options.title === '选择下载目录'
+          ? 'downloads'
+          : 'upload-folder'
+        : 'upload-fixture.txt',
+    ),
+  ],
 });
 dialog.showSaveDialog = async () => ({
   canceled: false,

@@ -1,7 +1,9 @@
 export type Connection = {
   id: string;
   name: string;
-  provider: 'aliyun';
+  provider: 'aliyun' | 's3';
+  forcePathStyle?: boolean;
+  allowInsecure?: boolean;
   region: string;
   endpoint: string;
   bucket: string;
@@ -14,6 +16,8 @@ export type ConnectionInput = Omit<Connection, 'id'> & {
   accessKeySecret: string;
   stsToken?: string;
   remember: boolean;
+  keepCredentials?: boolean;
+  clearStsToken?: boolean;
 };
 export type Bucket = { name: string; region: string; createdAt?: string };
 export type StorageObject = {
@@ -42,15 +46,31 @@ export type Preview = {
 export type Transfer = {
   id: string;
   name: string;
-  direction: 'upload' | 'download';
-  status: 'running' | 'completed' | 'failed';
+  direction: 'upload' | 'download' | 'copy' | 'move' | 'delete';
+  status: 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'skipped';
   progress: number;
   size: number;
   error?: string;
   bucket: string;
   startedAt: number;
+  connectionId?: string;
 };
-export type UploadItem = { name: string; path?: string; file?: File };
+export type ConflictPolicy = 'reject' | 'skip' | 'rename' | 'overwrite';
+export type UploadSummary = {
+  completed: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+};
+export type ObjectOperation = 'copy' | 'move' | 'rename' | 'delete';
+export type OperationPlan = { id: string; count: number; size: number };
+export type UploadItem = {
+  name: string;
+  path?: string;
+  file?: File;
+  relativePath?: string;
+  directory?: boolean;
+};
 export interface StorageBridge {
   connections(): Promise<Connection[]>;
   saveConnection(input: ConnectionInput): Promise<Connection>;
@@ -59,14 +79,35 @@ export interface StorageBridge {
   buckets(connectionId: string): Promise<Bucket[]>;
   list(request: ListRequest): Promise<ListResult>;
   preview(connectionId: string, bucket: string, object: StorageObject): Promise<Preview>;
-  pickUpload(): Promise<UploadItem[]>;
-  upload(connectionId: string, bucket: string, prefix: string, items: UploadItem[]): Promise<void>;
+  pickUpload(mode?: 'files' | 'folder'): Promise<UploadItem[]>;
+  upload(
+    connectionId: string,
+    bucket: string,
+    prefix: string,
+    items: UploadItem[],
+    conflict?: ConflictPolicy,
+  ): Promise<UploadSummary>;
   download(connectionId: string, bucket: string, objects: StorageObject[]): Promise<void>;
   createFolder(connectionId: string, bucket: string, prefix: string, name: string): Promise<void>;
   onTransfer(listener: (transfer: Transfer) => void): () => void;
+  prepareOperation(
+    connectionId: string,
+    bucket: string,
+    objects: StorageObject[],
+    operation: ObjectOperation,
+    target?: string,
+  ): Promise<OperationPlan>;
+  executeOperation(planId: string): Promise<Transfer>;
+  cancelTransfer(id: string): Promise<void>;
+  retryTransfer(id: string): Promise<Transfer | void>;
+  clearTransfers(): Promise<void>;
 }
 declare global {
   interface Window {
-    ossDesk?: StorageBridge & { platform: string; filePath(file: File): string };
+    ossDesk?: StorageBridge & {
+      platform: string;
+      filePath(file: File): string;
+      setAppearance?(theme: 'light' | 'dark'): Promise<void>;
+    };
   }
 }

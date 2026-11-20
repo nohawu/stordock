@@ -3,7 +3,7 @@ import { demo, demoConnection, DEMO_ID } from './demo';
 function native() {
   if (!window.ossDesk)
     throw new Error(
-      '真实 OSS 连接需要桌面客户端，请运行 npm run desktop。浏览器模式可体验完整演示空间。',
+      '真实存储连接需要桌面客户端，请运行 npm run desktop。浏览器模式可体验完整演示空间。',
     );
   return window.ossDesk;
 }
@@ -19,17 +19,31 @@ export const storage: StorageBridge = {
   list: (request) => (isDemo(request.connectionId) ? demo.list(request) : native().list(request)),
   preview: (id, bucket, object) =>
     isDemo(id) ? demo.preview(id, bucket, object) : native().preview(id, bucket, object),
-  pickUpload: () => native().pickUpload(),
-  upload: (id, bucket, prefix, items) =>
+  pickUpload: (mode) => native().pickUpload(mode),
+  upload: (id, bucket, prefix, items, conflict) =>
     isDemo(id)
-      ? demo.upload(id, bucket, prefix, items)
-      : native().upload(id, bucket, prefix, items),
+      ? demo.upload(id, bucket, prefix, items, conflict)
+      : native().upload(id, bucket, prefix, items, conflict),
   download: (id, bucket, objects) =>
     isDemo(id) ? demo.download(id, bucket, objects) : native().download(id, bucket, objects),
   createFolder: (id, bucket, prefix, name) =>
     isDemo(id)
       ? demo.createFolder(id, bucket, prefix, name)
       : native().createFolder(id, bucket, prefix, name),
+  prepareOperation: (id, bucket, objects, operation, target) =>
+    isDemo(id)
+      ? demo.prepareOperation(id, bucket, objects, operation, target)
+      : native().prepareOperation(id, bucket, objects, operation, target),
+  executeOperation: (planId) =>
+    planId.startsWith('demo-') ? demo.executeOperation(planId) : native().executeOperation(planId),
+  cancelTransfer: (id) =>
+    id.startsWith('demo-') ? demo.cancelTransfer(id) : native().cancelTransfer(id),
+  retryTransfer: (id) =>
+    id.startsWith('demo-') ? demo.retryTransfer(id) : native().retryTransfer(id),
+  clearTransfers: async () => {
+    await demo.clearTransfers();
+    await window.ossDesk?.clearTransfers();
+  },
   onTransfer(listener) {
     const offDemo = demo.onTransfer(listener);
     const offNative = window.ossDesk?.onTransfer(listener);
