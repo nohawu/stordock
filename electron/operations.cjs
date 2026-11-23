@@ -43,7 +43,7 @@ async function expandObjects(provider, connection, bucket, objects) {
   const sdk = provider.client(connection, bucket);
   for (const object of deduplicateObjects(objects)) {
     if (object.kind === 'file') {
-      const head = await sdk.head(object.key);
+      const head = await sdk.head(object.key, { versionId: object.versionId });
       result.set(object.key, {
         ...object,
         size: Number(head.res.headers['content-length']),
@@ -77,7 +77,15 @@ async function expandObjects(provider, connection, bucket, objects) {
   }
   return [...result.values()];
 }
-async function prepareOperation(provider, connection, bucket, objects, operation, target) {
+async function prepareOperation(
+  provider,
+  connection,
+  bucket,
+  objects,
+  operation,
+  target,
+  options = {},
+) {
   if (!['copy', 'move', 'rename', 'delete'].includes(operation)) throw new Error('操作类型无效');
   const roots = deduplicateObjects(objects);
   if (operation === 'rename' && roots.length !== 1) throw new Error('每次只能重命名一项');
@@ -93,7 +101,10 @@ async function prepareOperation(provider, connection, bucket, objects, operation
           : target +
             root.key.replace(/\/$/, '').split('/').pop() +
             (root.kind === 'folder' ? '/' : '');
-      if (destination === root.key || (root.kind === 'folder' && destination.startsWith(root.key)))
+      if (
+        !options.differentTarget &&
+        (destination === root.key || (root.kind === 'folder' && destination.startsWith(root.key)))
+      )
         throw new Error('目标不能是原路径或源文件夹的子目录');
     }
   }
@@ -112,7 +123,7 @@ async function prepareOperation(provider, connection, bucket, objects, operation
             (root.kind === 'folder' ? '/' : '');
       entry.target = ensureKey(
         base + entry.key.slice(root.key.length),
-        connection.provider === 's3' ? 1024 : 1023,
+        options.targetMaxBytes || (connection.provider === 's3' ? 1024 : 1023),
       );
     }
   }

@@ -7,6 +7,57 @@ test.beforeEach(async ({ page }) => {
     page.getByRole('button', { name: 'cover-landscape.svg', exact: true }),
   ).toBeVisible();
 });
+
+test('workspace restores open tabs and paths, and bookmarks navigate after reload', async ({
+  page,
+}) => {
+  await page.getByRole('button', { name: 'images', exact: true }).dblclick();
+  await page.getByRole('button', { name: '收藏当前路径', exact: true }).click();
+  await page.getByRole('button', { name: 'project-backups', exact: true }).click();
+  await page.getByRole('button', { name: '2026', exact: true }).dblclick();
+  await expect(page.getByRole('button', { name: 'manifest.json', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'manifest.json', exact: true })).toBeVisible();
+  await expect(page.locator('.workspace-tab')).toHaveCount(2);
+  await page.locator('.bookmarks').getByRole('button', { name: 'images', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'morning-hills.svg', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '移除收藏 images', exact: true }).click();
+  await page.reload();
+  await expect(page.locator('.bookmarks')).toHaveCount(0);
+});
+
+test('directory tree expands lazily, navigates nested folders and refreshes after creation', async ({
+  page,
+}) => {
+  const sidebar = page.locator('.connection-tree');
+  await expect(sidebar.getByRole('button', { name: '打开目录 images/', exact: true })).toHaveCount(
+    0,
+  );
+  await sidebar.getByRole('button', { name: '展开目录 studio-assets', exact: true }).click();
+  await sidebar.getByRole('button', { name: '打开目录 images/', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'morning-hills.svg', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '新建文件夹', exact: true }).click();
+  await page.getByRole('textbox', { name: '文件夹名称' }).fill('nested');
+  await page.getByRole('button', { name: '创建文件夹', exact: true }).click();
+  await expect(
+    sidebar.getByRole('button', { name: '打开目录 images/nested/', exact: true }),
+  ).toBeVisible();
+  await sidebar.getByRole('button', { name: '打开目录 images/nested/', exact: true }).click();
+  await expect(page.locator('.breadcrumbs')).toContainText('nested');
+  await expect(
+    sidebar.getByRole('button', { name: '打开目录 images/nested/', exact: true }).locator('..'),
+  ).toHaveClass(/active/);
+  await sidebar.getByRole('button', { name: '收起目录 studio-assets', exact: true }).click();
+  await expect(sidebar.getByRole('button', { name: '打开目录 images/', exact: true })).toHaveCount(
+    0,
+  );
+  await sidebar.getByRole('button', { name: '展开目录 studio-assets', exact: true }).click();
+  await expect(
+    sidebar.getByRole('button', { name: '打开目录 images/nested/', exact: true }),
+  ).toBeVisible();
+  await expect(sidebar.locator('.spin')).toHaveCount(0);
+  await page.screenshot({ path: 'test-results/directory-tree.png', animations: 'disabled' });
+});
 test('browse folders, back, recursive search, text preview and tabs', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -200,7 +251,7 @@ test('single click selects, double click opens and inspector preference persists
   await expect(page.locator('.inspector')).toHaveCount(0);
   await page.reload();
   await expect(page.locator('.inspector')).toHaveCount(0);
-  await page.getByRole('button', { name: 'cover-landscape.svg', exact: true }).dblclick();
+  await page.getByRole('button', { name: 'morning-hills.svg', exact: true }).dblclick();
   await expect(page.locator('.image-preview img')).toBeVisible();
 });
 
@@ -376,6 +427,37 @@ test('preview can retry and clipboard failures are visible', async ({ page }) =>
   await expect(page.locator('.text-preview')).toContainText('StorDock');
   await page.getByRole('button', { name: '复制对象路径', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('复制失败');
+});
+
+test('object details expose copyable keys, exact sizes and content type with independent retry', async ({
+  page,
+}) => {
+  await page.evaluate(async () => {
+    Object.defineProperty(navigator.clipboard, 'writeText', {
+      configurable: true,
+      value: async (value: string) => {
+        (window as any).__copiedInfo = value;
+      },
+    });
+    const modulePath = '/src/lib/demo.ts';
+    const { demo } = await import(/* @vite-ignore */ modulePath);
+    const original = demo.objectInfo;
+    let attempts = 0;
+    demo.objectInfo = (...args: unknown[]) =>
+      ++attempts === 1 ? Promise.reject(new Error('属性暂时不可用')) : original(...args);
+  });
+  await page.getByRole('button', { name: 'README.md', exact: true }).dblclick();
+  await page.getByRole('button', { name: '对象信息', exact: true }).click();
+  await expect(page.locator('.metadata')).toContainText('Region');
+  await expect(page.locator('.metadata')).toContainText('字节');
+  await expect(page.locator('.metadata')).toContainText('属性暂时不可用');
+  await page.getByRole('button', { name: '复制对象路径', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__copiedInfo)).toBe('README.md');
+  await page.getByRole('button', { name: '重新读取属性', exact: true }).click();
+  await expect(page.locator('.metadata')).toContainText('text/plain');
+  await page.getByRole('button', { name: '复制完整对象路径', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__copiedInfo)).toBe('studio-assets/README.md');
+  await expect(page.locator('.metadata')).toContainText('本地演示空间，不提供真实 HTTP 访问地址');
 });
 
 test('empty recursive results can continue scanning and same query can refresh', async ({

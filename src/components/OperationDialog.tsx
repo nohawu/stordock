@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Modal } from './Modal';
 import { storage } from '../lib/storage';
 import { folderNameError, formatBytes } from '../lib/objects';
-import type { ObjectOperation, OperationPlan, StorageObject } from '../types';
+import type { Connection, ObjectOperation, OperationPlan, StorageObject } from '../types';
 export type OperationContext = {
   connectionId: string;
   bucket: string;
@@ -24,6 +24,25 @@ export function OperationDialog({
   const [target, setTarget] = useState(
     operation === 'rename' ? objects[0].key.replace(/\/$/, '').split('/').pop()! : '',
   );
+  const [targetConnection, setTargetConnection] = useState(connectionId);
+  const [targetBucket, setTargetBucket] = useState(bucket);
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [buckets, setBuckets] = useState<string[]>([]);
+  const canMigrate = connectionId !== 'demo-studio' && ['copy', 'move'].includes(operation);
+  useEffect(() => {
+    if (canMigrate)
+      void storage
+        .connections()
+        .then((items) => setConnections(items.filter((item) => item.id !== 'demo-studio')))
+        .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (canMigrate)
+      void storage
+        .buckets(targetConnection)
+        .then((items) => setBuckets(items.map((item) => item.name)))
+        .catch(() => setBuckets([]));
+  }, [targetConnection]);
   const [plan, setPlan] = useState<OperationPlan>();
   const [confirmation, setConfirmation] = useState('');
   const [busy, setBusy] = useState(false);
@@ -49,7 +68,16 @@ export function OperationDialog({
     setBusy(true);
     try {
       setPlan(
-        await storage.prepareOperation(connectionId, bucket, objects, operation, destination),
+        canMigrate && (targetConnection !== connectionId || targetBucket !== bucket)
+          ? await storage.feature<OperationPlan>('migration:prepare', {
+              connectionId,
+              bucket,
+              objects,
+              operation,
+              target: destination,
+              destination: { connectionId: targetConnection, bucket: targetBucket },
+            })
+          : await storage.prepareOperation(connectionId, bucket, objects, operation, destination),
       );
     } catch (error) {
       setError(error instanceof Error ? error.message : '无法统计操作范围');
@@ -78,9 +106,50 @@ export function OperationDialog({
           ))}
           {objects.length > 5 && <small>另有 {objects.length - 5} 项</small>}
         </div>
+        {canMigrate && (
+          <>
+            <label className="field">
+              目标连接
+              <select
+                aria-label="目标连接"
+                disabled={busy || !!plan}
+                value={targetConnection}
+                onChange={(event) => {
+                  setTargetConnection(event.target.value);
+                  setTargetBucket('');
+                }}
+              >
+                {connections.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              目标 Bucket
+              <input
+                list="migration-buckets"
+                aria-label="目标 Bucket"
+                required
+                disabled={busy || !!plan}
+                value={targetBucket}
+                onChange={(event) => setTargetBucket(event.target.value)}
+              />
+              <datalist id="migration-buckets">
+                {buckets.map((name) => (
+                  <option key={name}>{name}</option>
+                ))}
+              </datalist>
+            </label>
+            <p className="selection-note">
+              跨连接复制通过本机临时文件中转，可能产生网络流量和临时磁盘占用。全部复制并校验成功后，移动操作才会删除源对象。
+            </p>
+          </>
+        )}
         {operation !== 'delete' && (
           <label className="field">
-            {operation === 'rename' ? '新名称' : '目标目录（当前 Bucket 内）'}
+            {operation === 'rename' ? '新名称' : '目标目录'}
             <input
               autoFocus
               disabled={busy || !!plan}
@@ -105,7 +174,7 @@ export function OperationDialog({
               {operation === 'delete'
                 ? '包含所选文件夹内的对象；删除后能否恢复取决于 Bucket 的版本控制设置。'
                 : operation === 'copy'
-                  ? '在当前 Bucket 内复制，保留源对象。'
+                  ? `复制到 ${targetBucket || bucket}，保留源对象。`
                   : '先复制，再删除源对象；部分失败或取消时，已复制的目标会保留，请在任务中心检查结果。'}
             </p>
           </div>

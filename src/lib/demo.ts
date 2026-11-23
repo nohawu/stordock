@@ -207,6 +207,7 @@ export const demo: Pick<
   | 'buckets'
   | 'list'
   | 'preview'
+  | 'objectInfo'
   | 'upload'
   | 'download'
   | 'createFolder'
@@ -251,6 +252,18 @@ export const demo: Pick<
     if (entry.content !== undefined && entry.mime === 'text/plain')
       return { kind: 'text', content: entry.content, size: entry.size };
     return { kind: 'unsupported', size: entry.size };
+  },
+  async objectInfo(_id, bucket, key) {
+    const entry = data[bucket]?.find((item) => item.key === key);
+    if (!entry) throw new Error('文件已不存在');
+    return {
+      size: entry.size,
+      lastModified: entry.lastModified,
+      etag: entry.etag,
+      storageClass: entry.storageClass,
+      contentType: entry.mime,
+      metadata: {},
+    };
   },
   async createFolder(_id, bucket, prefix, name) {
     const error = folderNameError(name);
@@ -351,6 +364,17 @@ export const demo: Pick<
     for (const object of selectedEntries(bucket, objects).filter(
       (entry) => entry.kind === 'file',
     )) {
+      if (window.ossDesk?.saveDemoDownload) {
+        const entry = data[bucket].find((item) => item.key === object.key);
+        if (!entry || entry.content === undefined) throw new Error('此文件没有可下载内容');
+        const bytes = entry.content.startsWith('data:')
+          ? Uint8Array.from(atob(entry.content.split(',')[1]), (character) =>
+              character.charCodeAt(0),
+            )
+          : new TextEncoder().encode(entry.content);
+        await window.ossDesk.saveDemoDownload(bucket, object.key, bytes.buffer);
+        continue;
+      }
       await tasks.run(
         { name: object.name, size: object.size, bucket, direction: 'download' },
         async (signal) => {

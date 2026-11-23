@@ -19,10 +19,12 @@ export function ConnectionDialog({
   onClose,
   onSaved,
   connection,
+  draft,
 }: {
   onClose(): void;
   onSaved(connection: Connection): void;
   connection?: Connection;
+  draft?: Partial<ConnectionInput>;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState<ConnectionInput>({
@@ -38,6 +40,7 @@ export function ConnectionDialog({
     allowInsecure: false,
     remember: true,
     ...connection,
+    ...draft,
     keepCredentials: !!connection,
     ...(connection ? { remember: !connection.temporary } : {}),
   });
@@ -228,7 +231,7 @@ export function ConnectionDialog({
               <KeyRound size={13} /> {isS3 ? 'Access Key ID' : 'AccessKey ID'}
             </span>
             <input
-              required
+              required={!form.credentialRefreshUrl}
               autoComplete="off"
               spellCheck={false}
               placeholder={isS3 ? '输入 Access Key ID' : '输入 AccessKey ID'}
@@ -242,9 +245,10 @@ export function ConnectionDialog({
             </span>
             <input
               required={
-                !connection ||
-                form.provider !== connection.provider ||
-                form.accessKeyId !== connection.accessKeyId
+                !form.credentialRefreshUrl &&
+                (!connection ||
+                  form.provider !== connection.provider ||
+                  form.accessKeyId !== connection.accessKeyId)
               }
               autoComplete="new-password"
               type="password"
@@ -296,6 +300,33 @@ export function ConnectionDialog({
                   />
                 </label>
               )}
+              <label className="field">
+                临时凭据刷新 URL <span className="optional">可选</span>
+                <input
+                  type="url"
+                  aria-label="临时凭据刷新 URL"
+                  placeholder="https://auth.example.com/storage-credentials"
+                  value={form.credentialRefreshUrl || ''}
+                  onChange={(event) => update('credentialRefreshUrl', event.target.value)}
+                />
+                <small className="field-help">
+                  通过 HTTPS GET 获取临时凭据和
+                  Expiration，到期前自动刷新。现有云端密钥不会发送到此地址。
+                </small>
+              </label>
+              <label className="field">
+                刷新服务 Bearer Token <span className="optional">可选</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  aria-label="刷新服务 Bearer Token"
+                  placeholder={
+                    connection ? '留空保留；修改刷新地址时重新填写' : '仅在主进程使用并加密保存'
+                  }
+                  value={form.credentialRefreshToken || ''}
+                  onChange={(event) => update('credentialRefreshToken', event.target.value)}
+                />
+              </label>
               <label className="field">
                 {isS3 ? 'Session Token' : 'STS Token'} <span className="optional">可选</span>
                 <textarea

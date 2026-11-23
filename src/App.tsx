@@ -42,10 +42,15 @@ import {
   Trash2,
   Upload,
   X,
+  Link,
+  Star,
+  FolderSync,
+  Import,
 } from 'lucide-react';
 import type {
   Bucket,
   Connection,
+  ConnectionInput,
   Preview,
   StorageObject,
   Transfer,
@@ -65,24 +70,15 @@ import { OperationDialog, type OperationContext } from './components/OperationDi
 import { UploadDialog, type UploadContext } from './components/UploadDialog';
 import { isActiveTransfer } from './lib/transfers';
 import { readDroppedItems } from './lib/drop';
+import { DirectoryTree } from './components/DirectoryTree';
+import { copyText } from './lib/clipboard';
+import { ShareDialog, type ShareContext } from './components/ShareDialog';
+import { ObjectToolsDialog } from './components/ObjectToolsDialog';
+import { SyncDialog } from './components/SyncDialog';
+import { ConnectionToolsDialog } from './components/ConnectionToolsDialog';
+import { UpdateControls } from './components/UpdateControls';
+import { readWorkspace, saveWorkspace, type WorkspaceTab, type Bookmark } from './lib/workspace';
 
-type WorkspaceTab = {
-  id: string;
-  connectionId: string;
-  bucket: string;
-  region: string;
-  prefix: string;
-  query: string;
-  searchMode: 'loaded' | 'recursive';
-  searchQuery: string;
-  filter: string;
-  sort: { field: 'name' | 'size' | 'lastModified'; ascending: boolean };
-  selection: string[];
-  anchor: string;
-  scrollTop: number;
-  history: string[];
-  position: number;
-};
 const initialTab: WorkspaceTab = {
   id: `${DEMO_ID}/studio-assets`,
   connectionId: DEMO_ID,
@@ -112,8 +108,9 @@ export default function App() {
   const [expanded, setExpanded] = useState(new Set([DEMO_ID]));
   const [bucketLoading, setBucketLoading] = useState<string>();
   const [connectionQuery, setConnectionQuery] = useState('');
-  const [tabs, setTabs] = useState<WorkspaceTab[]>([initialTab]);
-  const [activeId, setActiveId] = useState(initialTab.id);
+  const [tabs, setTabs] = useState<WorkspaceTab[]>(() => readWorkspace(initialTab).tabs);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => readWorkspace(initialTab).bookmarks);
+  const [activeId, setActiveId] = useState(() => readWorkspace(initialTab).activeId);
   const [page, setPage] = useState<'files' | 'transfers'>('files');
   const [objects, setObjects] = useState<StorageObject[]>([]);
   const [objectsKey, setObjectsKey] = useState('');
@@ -143,7 +140,15 @@ export default function App() {
   }>();
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [modal, setModal] = useState<
-    'connection' | 'folder' | 'settings' | 'help' | 'command' | null
+    | 'connection'
+    | 'folder'
+    | 'settings'
+    | 'help'
+    | 'command'
+    | 'object-tools'
+    | 'sync'
+    | 'connections-tools'
+    | null
   >(null);
   const [folderName, setFolderName] = useState('');
   const [folderError, setFolderError] = useState('');
@@ -151,8 +156,10 @@ export default function App() {
   const [uploadBusy, setUploadBusy] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [editConnection, setEditConnection] = useState<Connection>();
+  const [connectionDraft, setConnectionDraft] = useState<Partial<ConnectionInput>>();
   const [operationContext, setOperationContext] = useState<OperationContext>();
   const [pendingUpload, setPendingUpload] = useState<UploadContext>();
+  const [shareContext, setShareContext] = useState<ShareContext>();
   const [dragging, setDragging] = useState(false);
   const [toast, setToast] = useState<{ text: string; error?: boolean; transfers?: boolean }>();
   const [commandQuery, setCommandQuery] = useState('');
@@ -218,11 +225,36 @@ export default function App() {
     localStorage.setItem('ossdesk-inspector', String(inspector));
   }, [inspector]);
   useEffect(() => {
+    if (!tabs.some((tab) => tab.id === activeId)) setActiveId(tabs[0]?.id || '');
+  }, [tabs, activeId]);
+  useEffect(() => {
+    saveWorkspace(tabs, activeId, bookmarks);
+  }, [tabs, activeId, bookmarks]);
+  useEffect(() => {
     let alive = true;
     storage
       .connections()
       .then((c) => {
-        if (alive) setConnections(c);
+        if (alive) {
+          setConnections(c);
+          const ids = new Set(c.map((item) => item.id));
+          setTabs((previous) => {
+            const available = previous.filter((tab) => ids.has(tab.connectionId));
+            return available.length ? available : [initialTab];
+          });
+          setBookmarks((previous) => previous.filter((item) => ids.has(item.connectionId)));
+          const restoredIds = [
+            ...new Set(readWorkspace(initialTab).tabs.map((tab) => tab.connectionId)),
+          ].filter((id) => id !== DEMO_ID && ids.has(id));
+          void Promise.allSettled(
+            restoredIds.map(async (id) => {
+              const buckets = await storage.buckets(id);
+              if (alive) setBucketMap((previous) => ({ ...previous, [id]: buckets }));
+            }),
+          ).then(() => {
+            if (alive && restoredIds.length) setRevision((value) => value + 1);
+          });
+        }
       })
       .catch((e) => notify(errorMessage(e), true));
     storage.buckets(DEMO_ID).then((b) => {
@@ -232,19 +264,38 @@ export default function App() {
       alive = false;
     };
   }, [notify]);
-  useEffect(
-    () =>
-      storage.onTransfer((t) => {
-        setTransfers((prev) => {
-          const index = prev.findIndex((p) => p.id === t.id);
-          if (index < 0) return [t, ...prev].slice(0, 200);
-          const next = [...prev];
-          next[index] = t;
-          return next;
-        });
-      }),
-    [],
-  );
+  useEffect(() => {
+    let alive = true;
+    const off = storage.onTransfer((t) => {
+      setTransfers((prev) => {
+        const index = prev.findIndex((p) => p.id === t.id);
+        if (index < 0) {
+          let ended = 0;
+          return [t, ...prev].filter(
+            (item) => isActiveTransfer(item) || item.status === 'paused' || ++ended <= 200,
+          );
+        }
+        const next = [...prev];
+        next[index] = t;
+        return next;
+      });
+    });
+    void storage
+      .listTransfers()
+      .then((saved) => {
+        if (alive)
+          setTransfers((previous) =>
+            [...new Map([...saved, ...previous].map((task) => [task.id, task])).values()].sort(
+              (a, b) => b.startedAt - a.startedAt,
+            ),
+          );
+      })
+      .catch((error) => notify(errorMessage(error), true));
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [notify]);
   useEffect(() => {
     const id = ++requestId.current;
     setContextMenu(undefined);
@@ -448,11 +499,25 @@ export default function App() {
       setSelected('');
     }
   }
-  function openBucket(connectionId: string, bucket: Bucket) {
+  function openBucket(connectionId: string, bucket: Bucket, prefix?: string) {
     const id = `${connectionId}/${bucket.name}`;
     setTabs((prev) =>
       prev.some((t) => t.id === id)
-        ? prev
+        ? prev.map((tab) =>
+            tab.id === id && prefix !== undefined
+              ? {
+                  ...tab,
+                  prefix,
+                  query: '',
+                  searchQuery: '',
+                  selection: [],
+                  anchor: '',
+                  scrollTop: 0,
+                  history: [...tab.history.slice(0, tab.position + 1), prefix],
+                  position: tab.position + 1,
+                }
+              : tab,
+          )
         : [
             ...prev,
             {
@@ -461,9 +526,9 @@ export default function App() {
               connectionId,
               bucket: bucket.name,
               region: bucket.region,
-              prefix: '',
+              prefix: prefix || '',
               query: '',
-              history: [''],
+              history: [prefix || ''],
               position: 0,
             },
           ],
@@ -515,6 +580,7 @@ export default function App() {
     setEditConnection(undefined);
     const buckets = await expandConnection(c.id, true);
     if (buckets?.[0]) openBucket(c.id, buckets[0]);
+    setConnectionDraft(undefined);
     notify('连接已保存');
   }
   async function removeConnection() {
@@ -620,7 +686,7 @@ export default function App() {
   }
   async function copyPath(path: string) {
     try {
-      await navigator.clipboard.writeText(path);
+      await copyText(path);
       notify('对象路径已复制');
     } catch {
       notify('复制失败，请重试', true);
@@ -690,9 +756,11 @@ export default function App() {
       notify(errorMessage(error), true);
     }
   }
-  async function transferAction(id: string, action: 'cancel' | 'retry') {
+  async function transferAction(id: string, action: 'cancel' | 'retry' | 'pause' | 'reveal') {
     try {
       if (action === 'cancel') await storage.cancelTransfer(id);
+      else if (action === 'pause') await storage.pauseTransfer(id);
+      else if (action === 'reveal') await storage.revealTransfer(id);
       else {
         await storage.retryTransfer(id);
         setRevision((value) => value + 1);
@@ -719,9 +787,9 @@ export default function App() {
     try {
       const summary = await storage.upload(connectionId, bucket, prefix, items, conflict);
       setRevision((r) => r + 1);
-      const { completed, failed: failures, skipped, cancelled } = summary;
+      const { completed, failed: failures, skipped, cancelled, paused = 0 } = summary;
       setToast({
-        text: `上传任务已处理：${completed} 个成功，${failures} 个失败${skipped ? `，${skipped} 个跳过` : ''}${cancelled ? `，${cancelled} 个取消` : ''}`,
+        text: `上传任务已处理：${completed} 个成功，${failures} 个失败${skipped ? `，${skipped} 个跳过` : ''}${cancelled ? `，${cancelled} 个取消` : ''}${paused ? `，${paused} 个暂停，可到传输中心继续` : ''}`,
         error: failures > 0,
         transfers: true,
       });
@@ -994,6 +1062,40 @@ export default function App() {
           )}
         </label>
         <div className="connection-tree">
+          {bookmarks.length > 0 && (
+            <div className="bookmarks">
+              <div className="section-label">收藏路径</div>
+              {bookmarks.map((item, index) => (
+                <div
+                  className="bookmark-row"
+                  key={`${item.connectionId}/${item.bucket}/${item.prefix}`}
+                >
+                  <button
+                    title={`${item.bucket}/${item.prefix}`}
+                    onClick={() =>
+                      openBucket(
+                        item.connectionId,
+                        { name: item.bucket, region: item.region },
+                        item.prefix,
+                      )
+                    }
+                  >
+                    <Star size={12} />
+                    <span>{item.name}</span>
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label={`移除收藏 ${item.name}`}
+                    onClick={() =>
+                      setBookmarks((previous) => previous.filter((_, i) => i !== index))
+                    }
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {visibleConnections.map((c) => (
             <div className="connection-group" key={c.id}>
               <div
@@ -1072,22 +1174,18 @@ export default function App() {
                         b.name.toLowerCase().includes(connectionNeedle),
                     )
                     .map((b) => (
-                      <button
+                      <DirectoryTree
                         key={b.name}
-                        title={`${b.name} · ${b.region}`}
-                        className={
+                        connectionId={c.id}
+                        bucket={b}
+                        currentPrefix={
                           current?.connectionId === c.id && current.bucket === b.name
-                            ? 'active'
-                            : ''
+                            ? current.prefix
+                            : undefined
                         }
-                        onClick={() => openBucket(c.id, b)}
-                      >
-                        <Database size={14} strokeWidth={1.6} />
-                        <span>{b.name}</span>
-                        {current?.connectionId === c.id && current.bucket === b.name && (
-                          <span className="tree-active-dot" />
-                        )}
-                      </button>
+                        revision={revision}
+                        onOpen={(prefix) => openBucket(c.id, b, prefix)}
+                      />
                     ))}
                   {bucketMap[c.id]?.length === 0 && (
                     <span className="tree-empty">没有可访问的存储桶</span>
@@ -1103,12 +1201,18 @@ export default function App() {
           <Plus size={15} />
           新建存储连接
         </button>
+        {window.ossDesk && (
+          <button className="add-connection" onClick={() => setModal('connections-tools')}>
+            <Import size={15} />
+            连接导入 / 导出
+          </button>
+        )}
         <div className="sidebar-bottom">
           <span>
             <ShieldCheck size={13} />
             凭据仅保存在本机
           </span>
-          <span>v0.1.0</span>
+          <span>v0.2.0</span>
         </div>
       </aside>
       <div className="main-shell">
@@ -1155,11 +1259,17 @@ export default function App() {
               onClear={() => {
                 void storage
                   .clearTransfers()
-                  .then(() => setTransfers((prev) => prev.filter(isActiveTransfer)))
+                  .then(() =>
+                    setTransfers((prev) =>
+                      prev.filter((task) => isActiveTransfer(task) || task.status === 'paused'),
+                    ),
+                  )
                   .catch((error) => notify(errorMessage(error), true));
               }}
               onCancel={(id) => void transferAction(id, 'cancel')}
               onRetry={(id) => void transferAction(id, 'retry')}
+              onPause={(id) => void transferAction(id, 'pause')}
+              onReveal={(id) => void transferAction(id, 'reveal')}
             />
           ) : !current ? (
             <div className="large-empty no-workspace">
@@ -1341,6 +1451,50 @@ export default function App() {
                     >
                       <Copy size={13} />
                     </button>
+                    <button
+                      className="icon-button"
+                      aria-label="收藏当前路径"
+                      title="收藏当前路径"
+                      onClick={() => {
+                        const exists = bookmarks.some(
+                          (item) =>
+                            item.connectionId === current.connectionId &&
+                            item.bucket === current.bucket &&
+                            item.prefix === current.prefix,
+                        );
+                        if (exists) {
+                          notify('该路径已收藏');
+                          return;
+                        }
+                        if (bookmarks.length >= 100) {
+                          notify('最多收藏 100 个路径', true);
+                          return;
+                        }
+                        setBookmarks((previous) => [
+                          ...previous,
+                          {
+                            connectionId: current.connectionId,
+                            bucket: current.bucket,
+                            region: current.region,
+                            prefix: current.prefix,
+                            name: current.prefix.split('/').filter(Boolean).pop() || current.bucket,
+                          },
+                        ]);
+                      }}
+                    >
+                      <Star size={15} />
+                    </button>
+                    {!isDemo && (
+                      <button
+                        className="icon-button"
+                        aria-label="同步本地目录"
+                        title="同步本地目录"
+                        onClick={() => setModal('sync')}
+                      >
+                        <FolderSync size={16} />
+                      </button>
+                    )}
+
                     <div className="page-actions">
                       <button className="button secondary new-folder-button" onClick={newFolder}>
                         <FolderPlus size={14} />
@@ -1896,11 +2050,24 @@ export default function App() {
                   error={previewError}
                   onClose={() => setInspector(false)}
                   onDownload={() => download(selectedObjects)}
+                  onShare={
+                    !isDemo && selectedObject
+                      ? () =>
+                          setShareContext({
+                            connectionId: current.connectionId,
+                            bucket: current.bucket,
+                            objectKey: selectedObject.key,
+                          })
+                      : undefined
+                  }
                   downloadBusy={downloadBusy}
                   onRetry={() => setPreviewRevision((value) => value + 1)}
                   onCopyError={() => notify('复制失败，请重试', true)}
                   previewVersion={previewVersion}
+                  onManage={!isDemo && selectedObject ? () => setModal('object-tools') : undefined}
                   bucket={current.bucket}
+                  connection={connection}
+                  region={current.region}
                 />
               )}
             </div>
@@ -1974,6 +2141,44 @@ export default function App() {
           e.target.value = '';
         }}
       />
+      {modal === 'object-tools' && current && selectedObject && connection && (
+        <ObjectToolsDialog
+          connection={connection}
+          bucket={current.bucket}
+          object={selectedObject}
+          onClose={() => {
+            setModal(null);
+            setRevision((value) => value + 1);
+          }}
+          onChanged={() => setPreviewRevision((value) => value + 1)}
+        />
+      )}
+      {modal === 'sync' && current && (
+        <SyncDialog
+          connectionId={current.connectionId}
+          bucket={current.bucket}
+          prefix={current.prefix}
+          onClose={() => setModal(null)}
+          onChanged={() => setRevision((value) => value + 1)}
+        />
+      )}
+      {modal === 'connections-tools' && (
+        <ConnectionToolsDialog
+          onClose={() => setModal(null)}
+          onImported={() => {
+            void storage
+              .connections()
+              .then(setConnections)
+              .catch((error) => notify(errorMessage(error), true));
+          }}
+          onDraft={(draft) => {
+            setConnectionDraft(draft);
+            setEditConnection(undefined);
+            setModal('connection');
+          }}
+        />
+      )}
+      {shareContext && <ShareDialog {...shareContext} onClose={() => setShareContext(undefined)} />}
       {pendingUpload && (
         <UploadDialog
           context={pendingUpload}
@@ -2067,6 +2272,25 @@ export default function App() {
                 <Copy size={14} />
                 复制到…
               </button>
+              {!isDemo &&
+                selectedObjects.length === 1 &&
+                selectedObjects[0].kind === 'file' &&
+                current && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setShareContext({
+                        connectionId: current.connectionId,
+                        bucket: current.bucket,
+                        objectKey: selectedObjects[0].key,
+                      });
+                      closeContextMenu();
+                    }}
+                  >
+                    <Link size={14} />
+                    分享文件
+                  </button>
+                )}
               <button role="menuitem" onClick={() => beginOperation('move')}>
                 <ArrowRight size={14} />
                 移动到…
@@ -2137,9 +2361,11 @@ export default function App() {
       {modal === 'connection' && (
         <ConnectionDialog
           connection={editConnection}
+          draft={connectionDraft}
           onClose={() => {
             setModal(null);
             setEditConnection(undefined);
+            setConnectionDraft(undefined);
           }}
           onSaved={saveConnection}
         />
@@ -2230,10 +2456,11 @@ export default function App() {
               <span />
             </button>
           </div>
+          <UpdateControls />
           <div className="settings-about">
             <Box size={25} />
             <strong>
-              StorDock <span>0.1.0</span>
+              StorDock <span>0.2.0</span>
             </strong>
             <p>
               一个简单、专注的对象存储工作空间。

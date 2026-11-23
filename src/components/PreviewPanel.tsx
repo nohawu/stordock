@@ -1,18 +1,9 @@
-import {
-  Check,
-  Copy,
-  Download,
-  Eye,
-  FileQuestion,
-  Files,
-  Loader2,
-  RefreshCw,
-  X,
-} from 'lucide-react';
+import { Download, Eye, FileQuestion, Files, Loader2, RefreshCw, X, Link } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import type { Preview, StorageObject } from '../types';
-import { dateLabel, extension, formatBytes } from '../lib/objects';
+import type { Connection, Preview, StorageObject } from '../types';
+import { extension, formatBytes } from '../lib/objects';
 import { ObjectIcon } from './ObjectIcon';
+import { ObjectDetails } from './ObjectDetails';
 export function PreviewPanel({
   object,
   selection,
@@ -26,6 +17,10 @@ export function PreviewPanel({
   onRetry,
   onCopyError,
   previewVersion,
+  onShare,
+  onManage,
+  connection,
+  region,
 }: {
   object?: StorageObject;
   selection: StorageObject[];
@@ -35,27 +30,21 @@ export function PreviewPanel({
   onClose(): void;
   onDownload(): void;
   bucket: string;
+  connection?: Connection;
+  region: string;
   downloadBusy: boolean;
   onRetry(): void;
   onCopyError(): void;
   previewVersion: number;
+  onShare?: () => void;
+  onManage?: () => void;
 }) {
   const [tab, setTab] = useState<'preview' | 'info'>('preview');
-  const [copied, setCopied] = useState('');
   useEffect(() => {
     setTab('preview');
   }, [previewVersion]);
   const single = selection.length === 1 ? selection[0] : undefined;
   const selectedFiles = selection.filter((item) => item.kind === 'file');
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(single!.key);
-      setCopied(single!.key);
-      setTimeout(() => setCopied(''), 1800);
-    } catch {
-      onCopyError();
-    }
-  }
   return (
     <aside className="inspector" aria-label="文件预览">
       <div className="inspector-heading">
@@ -107,28 +96,15 @@ export function PreviewPanel({
             <h3>{single.name}</h3>
             <span>文件夹</span>
           </div>
-          <div className="metadata">
-            <div className="section-label">对象信息</div>
-            <dl>
-              <div>
-                <dt>存储桶</dt>
-                <dd>{bucket}</dd>
-              </div>
-            </dl>
-            <div className="path-label">
-              对象路径
-              <button
-                className="icon-button"
-                aria-label="复制对象路径"
-                title={copied === single.key ? '已复制' : '复制对象路径'}
-                onClick={copy}
-              >
-                {copied === single.key ? <Check size={13} /> : <Copy size={13} />}
-              </button>
-            </div>
-            <code className="object-path">{single.key}</code>
-            <p className="selection-note">双击文件夹或按 Enter 进入。</p>
-          </div>
+          <ObjectDetails
+            key={`${connection?.id}/${bucket}/${single.key}`}
+            object={single}
+            connection={connection}
+            bucket={bucket}
+            region={region}
+            active={false}
+            onCopyError={onCopyError}
+          />
           <div className="inspector-footer">
             <button className="button secondary" disabled={downloadBusy} onClick={onDownload}>
               <Download size={15} />
@@ -202,53 +178,39 @@ export function PreviewPanel({
               )}
             </div>
           )}
-          <div className="metadata">
-            <div className="section-label">对象信息</div>
-            <dl>
-              <div>
-                <dt>文件大小</dt>
-                <dd>{formatBytes(preview?.size ?? object.size)}</dd>
-              </div>
-              <div>
-                <dt>存储类型</dt>
-                <dd>{object.storageClass === 'Standard' ? '标准存储' : object.storageClass}</dd>
-              </div>
-              <div>
-                <dt>最后修改</dt>
-                <dd>{dateLabel(object.lastModified)}</dd>
-              </div>
-              <div>
-                <dt>存储桶</dt>
-                <dd>{bucket}</dd>
-              </div>
-            </dl>
-            <div className="path-label">
-              对象路径
-              <button
-                className="icon-button"
-                onClick={copy}
-                title={copied === object.key ? '已复制' : '复制对象路径'}
-                aria-label="复制对象路径"
-              >
-                {copied === object.key ? <Check size={13} /> : <Copy size={13} />}
-              </button>
-            </div>
-            <code className="object-path">{object.key}</code>
-            {tab === 'info' && object.etag && (
-              <>
-                <div className="path-label">ETag</div>
-                <code className="object-path">{object.etag}</code>
-              </>
-            )}
-          </div>
+          <ObjectDetails
+            key={`${connection?.id}/${bucket}/${object.key}/${object.etag}/${object.lastModified}`}
+            object={object}
+            connection={connection}
+            bucket={bucket}
+            region={region}
+            active={tab === 'info'}
+            previewSize={preview?.size}
+            onCopyError={onCopyError}
+          />
           <div className="inspector-footer">
             <button className="button secondary" disabled={downloadBusy} onClick={onDownload}>
               <Download size={15} />
               下载文件
             </button>
+            {onManage && (
+              <button className="button secondary" onClick={onManage}>
+                管理属性、版本与归档
+              </button>
+            )}
+            {onShare && (
+              <button className="button secondary" onClick={onShare}>
+                <Link size={15} />
+                分享文件
+              </button>
+            )}
             <span>
               <span className="status-dot" />
-              通过安全连接访问
+              {connection?.id === 'demo-studio'
+                ? '本地演示空间'
+                : connection?.endpoint.startsWith('http:')
+                  ? 'HTTP 连接'
+                  : 'TLS 加密连接'}
             </span>
           </div>
         </>

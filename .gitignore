@@ -7,3 +7,9 @@ playwright-report/
 *.tsbuildinfo
 .env*
 !.env.example
+
+.idea/
+*.pfx
+*.p12
+*.pem
+*.key

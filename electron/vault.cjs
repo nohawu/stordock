@@ -55,6 +55,7 @@ class ConnectionVault {
           accessKeyId: connection.accessKeyId,
           accessKeySecret: connection.accessKeySecret,
           stsToken: connection.stsToken,
+          credentialRefreshToken: connection.credentialRefreshToken,
         }),
       );
       records.push({ metadata: publicConnection(connection), secret: secret.toString('base64') });
@@ -69,6 +70,27 @@ class ConnectionVault {
   async remove(id) {
     await this.write((await this.records()).filter((r) => r.metadata.id !== id));
     this.session.delete(id);
+  }
+  async importMany(connections) {
+    if (
+      !(await this.storage.isAsyncEncryptionAvailable()) ||
+      (process.platform === 'linux' && this.storage.getSelectedStorageBackend() === 'basic_text')
+    )
+      throw new Error('系统安全存储不可用，无法导入带凭据的备份');
+    const records = await this.records();
+    for (const connection of connections) {
+      const secret = await this.storage.encryptStringAsync(
+        JSON.stringify({
+          accessKeyId: connection.accessKeyId,
+          accessKeySecret: connection.accessKeySecret,
+          stsToken: connection.stsToken,
+          credentialRefreshToken: connection.credentialRefreshToken,
+        }),
+      );
+      records.push({ metadata: publicConnection(connection), secret: secret.toString('base64') });
+    }
+    await this.write(records);
+    return connections.map(publicConnection);
   }
 }
 module.exports = { ConnectionVault };

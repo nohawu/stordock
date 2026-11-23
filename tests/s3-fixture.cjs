@@ -13,9 +13,29 @@ async function createS3Fixture(options = {}) {
     ['hello.json', Buffer.from('{"storage":"s3","message":"你好"}')],
     ['folder/nested.txt', Buffer.from('Nested S3 object')],
   ]);
+  const attributes = new Map();
+  const tagSets = new Map();
+  const history = new Map();
+  function capture(key, body, deleted = false) {
+    if (!options.versioning) return;
+    const entries = history.get(key) || [];
+    entries.unshift({
+      id: randomUUID(),
+      body: Buffer.from(body || ''),
+      deleted,
+      modified: new Date().toISOString(),
+      attributes: { ...(attributes.get(key) || {}) },
+    });
+    history.set(key, entries);
+  }
+  if (options.versioning) for (const [key, body] of objects) capture(key, body);
   const uploads = new Map();
   const requests = [];
-  const controls = { failCopyKey: options.failCopyKey, failDeleteKey: options.failDeleteKey };
+  const controls = {
+    failCopyKey: options.failCopyKey,
+    failDeleteKey: options.failDeleteKey,
+    failPutKey: undefined,
+  };
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://fixture');
@@ -36,7 +56,7 @@ async function createS3Fixture(options = {}) {
         xml: request.method === 'POST' ? body.toString() : undefined,
       });
       const sendXml = (status, content) => {
-        response.writeHead(status, { 'Content-Type': 'application/xml' });
+        response.writeHead(status, { 'content-type': 'application/xml' });
         response.end(content);
       };
       const error = (status, code) =>
@@ -47,6 +67,51 @@ async function createS3Fixture(options = {}) {
           `<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>fixture</ID><DisplayName>fixture</DisplayName></Owner><Buckets><Bucket><Name>${bucket}</Name><CreationDate>2026-11-20T00:00:00Z</CreationDate></Bucket></Buckets></ListAllMyBucketsResult>`,
         );
       if (requestBucket !== bucket) return error(404, 'NoSuchBucket');
+      if (request.method === 'GET' && url.searchParams.has('versions')) {
+        const prefix = url.searchParams.get('prefix') || '';
+        const rows = [...history]
+          .filter(([name]) => name.startsWith(prefix))
+          .flatMap(([name, versions]) =>
+            versions.map(
+              (item, index) =>
+                `<${item.deleted ? 'DeleteMarker' : 'Version'}><Key>${xml(name)}</Key><VersionId>${item.id}</VersionId><IsLatest>${index === 0}</IsLatest><LastModified>${item.modified}</LastModified><Size>${item.body.length}</Size><ETag>${xml(etag(item.body))}</ETag><StorageClass>STANDARD</StorageClass><Owner><ID>fixture</ID><DisplayName>fixture</DisplayName></Owner></${item.deleted ? 'DeleteMarker' : 'Version'}>`,
+            ),
+          )
+          .join('');
+        return sendXml(
+          200,
+          `<ListVersionsResult><Name>${bucket}</Name><IsTruncated>false</IsTruncated>${rows}</ListVersionsResult>`,
+        );
+      }
+      if (url.searchParams.has('tagging')) {
+        if (request.method === 'GET')
+          return sendXml(
+            200,
+            `<Tagging><TagSet>${Object.entries(tagSets.get(key) || {})
+              .map(([k, v]) => `<Tag><Key>${xml(k)}</Key><Value>${xml(v)}</Value></Tag>`)
+              .join('')}</TagSet></Tagging>`,
+          );
+        if (request.method === 'PUT')
+          tagSets.set(
+            key,
+            Object.fromEntries(
+              [
+                ...body.toString().matchAll(/<Tag><Key>(.*?)<\/Key><Value>(.*?)<\/Value><\/Tag>/g),
+              ].map((item) => [item[1], item[2]]),
+            ),
+          );
+        if (request.method === 'DELETE') tagSets.delete(key);
+        response.writeHead(request.method === 'DELETE' ? 204 : 200);
+        return response.end();
+      }
+      if (request.method === 'POST' && url.searchParams.has('restore')) {
+        attributes.set(key, {
+          ...(attributes.get(key) || {}),
+          'x-amz-restore': 'ongoing-request="true"',
+        });
+        response.writeHead(202);
+        return response.end();
+      }
       if (request.method === 'GET' && url.searchParams.get('list-type') === '2') {
         const prefix = url.searchParams.get('prefix') || '';
         const delimiter = url.searchParams.get('delimiter');
@@ -120,12 +185,23 @@ async function createS3Fixture(options = {}) {
         );
       }
       if (request.method === 'PUT') {
+        if (controls.failPutKey === key) return error(403, 'AccessDenied');
+        if (
+          request.headers['if-match'] &&
+          (!objects.has(key) || request.headers['if-match'] !== etag(objects.get(key)))
+        )
+          return error(412, 'PreconditionFailed');
         if (request.headers['x-amz-copy-source']) {
           if (controls.failCopyKey === key) return error(403, 'AccessDenied');
-          const sourceKey = decodeURIComponent(request.headers['x-amz-copy-source'])
+          const [encodedSource, sourceVersion] =
+            request.headers['x-amz-copy-source'].split('?versionId=');
+          const sourceKey = decodeURIComponent(encodedSource)
             .replace(/^\//, '')
             .slice(bucket.length + 1);
-          const source = objects.get(sourceKey);
+          const source = sourceVersion
+            ? history.get(sourceKey)?.find((item) => item.id === decodeURIComponent(sourceVersion))
+                ?.body
+            : objects.get(sourceKey);
           if (!source) return error(404, 'NoSuchKey');
           if (request.headers['if-none-match'] === '*' && objects.has(key))
             return error(412, 'PreconditionFailed');
@@ -135,6 +211,26 @@ async function createS3Fixture(options = {}) {
           )
             return error(412, 'PreconditionFailed');
           objects.set(key, Buffer.from(source));
+          if (request.headers['x-amz-metadata-directive'] === 'REPLACE')
+            attributes.set(
+              key,
+              Object.fromEntries(
+                Object.entries(request.headers).filter(
+                  ([name]) =>
+                    [
+                      'content-type',
+                      'cache-control',
+                      'content-disposition',
+                      'content-language',
+                      'content-encoding',
+                      'expires',
+                      'x-amz-storage-class',
+                    ].includes(name) || name.startsWith('x-amz-meta-'),
+                ),
+              ),
+            );
+          else if (attributes.has(sourceKey)) attributes.set(key, { ...attributes.get(sourceKey) });
+          capture(key, source);
           return sendXml(
             200,
             `<CopyObjectResult><LastModified>2026-11-20T00:00:00Z</LastModified><ETag>${xml(etag(source))}</ETag></CopyObjectResult>`,
@@ -143,6 +239,7 @@ async function createS3Fixture(options = {}) {
         if (request.headers['if-none-match'] === '*' && objects.has(key))
           return error(412, 'PreconditionFailed');
         objects.set(key, body);
+        capture(key, body);
         response.writeHead(200, { ETag: etag(body) });
         return response.end();
       }
@@ -154,25 +251,42 @@ async function createS3Fixture(options = {}) {
           request.headers['if-match'] !== etag(objects.get(key))
         )
           return error(412, 'PreconditionFailed');
+        capture(key, undefined, true);
         objects.delete(key);
         response.writeHead(204);
         return response.end();
       }
       if (request.method === 'HEAD' || request.method === 'GET') {
-        const value = objects.get(key);
+        const version = url.searchParams.get('versionId');
+        const storedVersion = version
+          ? history.get(key)?.find((item) => item.id === version && !item.deleted)
+          : undefined;
+        const value = version ? storedVersion?.body : objects.get(key);
         if (!value) return error(404, 'NoSuchKey');
         const range = request.headers.range?.match(/^bytes=(\d+)-(\d+)$/);
         const output = range ? value.subarray(Number(range[1]), Number(range[2]) + 1) : value;
         response.writeHead(range ? 206 : 200, {
           'Content-Length': output.length,
-          'Content-Type': 'application/octet-stream',
+          'content-type': 'application/octet-stream',
           ETag: etag(value),
+          'Last-Modified': 'Thu, 19 Nov 2026 02:30:00 GMT',
+          'cache-control': 'public, max-age=3600',
+          'content-disposition': 'inline',
+          'x-amz-meta-project': 'fixture-project',
+          ...(storedVersion?.attributes || attributes.get(key) || {}),
+          ...(storedVersion ? { 'x-amz-version-id': storedVersion.id } : {}),
           ...(range
             ? {
                 'Content-Range': `bytes ${range[1]}-${Math.min(value.length - 1, Number(range[2]))}/${value.length}`,
               }
             : {}),
         });
+        if (request.method === 'GET' && !range && controls.slowDownloadKey === key) {
+          response.write(output.subarray(0, 16 * 1024));
+          const timer = setTimeout(() => response.end(output.subarray(16 * 1024)), 30000);
+          response.once('close', () => clearTimeout(timer));
+          return;
+        }
         return response.end(request.method === 'HEAD' ? undefined : output);
       }
       return error(501, 'NotImplemented');
@@ -192,6 +306,9 @@ async function createS3Fixture(options = {}) {
     uploads,
     requests,
     controls,
+    attributes,
+    tagSets,
+    history,
     async close() {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

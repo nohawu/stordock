@@ -31,7 +31,7 @@ async function tempDir() {
   return p;
 }
 afterEach(async () => {
-  taskManager.clear();
+  await taskManager.clear();
   for (const p of temporary.splice(0)) {
     if (
       path.dirname(p) !== path.resolve(os.tmpdir()) ||
@@ -224,6 +224,97 @@ describe('credential vault', () => {
   });
 });
 describe('provider preview and transfer behavior', () => {
+  it('exposes common OSS headers and user metadata without exposing request credentials', async () => {
+    const provider = new AliyunProvider(() => ({
+      head: async () => ({
+        res: {
+          headers: {
+            'content-length': '123',
+            'Content-Type': 'application/json',
+            'cache-control': 'max-age=60',
+            etag: 'tag',
+            'x-oss-version-id': 'version-1',
+            'x-oss-storage-class': 'IA',
+            'x-oss-meta-project': 'example',
+            authorization: 'private-authorization',
+            'x-oss-security-token': 'private-token',
+          },
+        },
+      }),
+    }));
+    const result = await provider.objectInfo(input, 'my-bucket', 'file.json');
+    expect(result).toMatchObject({
+      size: 123,
+      contentType: 'application/json',
+      cacheControl: 'max-age=60',
+      etag: 'tag',
+      versionId: 'version-1',
+      storageClass: 'IA',
+      metadata: { project: 'example' },
+    });
+    expect(JSON.stringify(result)).not.toContain('private-');
+  });
+  it.each([false, true])(
+    'resumes downloads with ETag and byte range checks (remote changed: %s)',
+    async (changed) => {
+      const dir = await tempDir();
+      const destination = path.join(dir, 'resume.txt');
+      const ranges: string[] = [];
+      const provider = new AliyunProvider(() => ({
+        head: async () => ({
+          res: { headers: { 'content-length': '10', etag: changed ? 'v2' : 'v1' } },
+        }),
+        getStream: async (_key: string, options: any) => {
+          if (options.headers.Range) {
+            ranges.push(options.headers.Range);
+            expect(options.headers['If-Match']).toBe('v1');
+            return {
+              stream: Readable.from([Buffer.from('efghij')]),
+              res: {
+                headers: { 'content-length': '6', 'content-range': 'bytes 4-9/10', etag: 'v1' },
+              },
+            };
+          }
+          return {
+            stream: Readable.from(
+              (async function* () {
+                yield Buffer.from('abcd');
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                yield Buffer.from('efghij');
+              })(),
+            ),
+            res: { headers: { 'content-length': '10', etag: 'v1' } },
+          };
+        },
+      }));
+      let id = '',
+        pausing = false;
+      await provider.download(
+        { id: 'test' },
+        'bucket',
+        [{ key: 'file.txt', size: 10 }],
+        destination,
+        (task: any) => {
+          id = task.id;
+          if (!pausing && task.progress > 0 && task.status === 'running') {
+            pausing = true;
+            setTimeout(() => taskManager.pause(id), 15);
+          }
+        },
+      );
+      expect(taskManager.records.get(id).metadata.status).toBe('paused');
+      const result = await taskManager.retry(id);
+      if (changed) {
+        expect(result.status).toBe('failed');
+        expect(result.error).toContain('远端文件已发生变化');
+        expect(await fs.readdir(dir)).toEqual([]);
+      } else {
+        expect(result).toMatchObject({ status: 'completed', localPath: destination });
+        expect(ranges).toEqual(['bytes=4-9']);
+        expect(await fs.readFile(destination, 'utf8')).toBe('abcdefghij');
+      }
+    },
+  );
   it('uses actual HEAD size to refuse oversized previews and handles empty text', async () => {
     let reads = 0;
     const provider = new AliyunProvider(() => ({

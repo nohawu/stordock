@@ -46,6 +46,17 @@ function validateConnection(input) {
   }
   const bucket = text('bucket', false);
   if (bucket) validateBucket(bucket, provider);
+  const credentialRefreshUrl = text('credentialRefreshUrl', false);
+  if (credentialRefreshUrl) {
+    let url;
+    try {
+      url = new URL(credentialRefreshUrl);
+    } catch {
+      throw new Error('凭据刷新地址无效');
+    }
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
+      throw new Error('凭据刷新地址必须为无账号、查询参数和片段的 HTTPS URL');
+  }
   return {
     id: input.id || randomUUID(),
     name: text('name'),
@@ -53,10 +64,12 @@ function validateConnection(input) {
     region,
     endpoint,
     bucket,
-    accessKeyId: text('accessKeyId'),
-    accessKeySecret: text('accessKeySecret'),
+    accessKeyId: text('accessKeyId', !credentialRefreshUrl),
+    accessKeySecret: text('accessKeySecret', !credentialRefreshUrl),
     stsToken: text('stsToken', false),
     remember: input.remember === true,
+    credentialRefreshUrl,
+    credentialRefreshToken: text('credentialRefreshToken', false),
     ...(provider === 's3'
       ? {
           forcePathStyle: input.forcePathStyle !== false,

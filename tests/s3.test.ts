@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { objectAddress } from '../src/lib/addresses';
 const require = createRequire(import.meta.url);
 const { validateConnection, validateBucket, publicConnection } = require('../electron/core.cjs');
 const { S3Provider, createS3Client } = require('../electron/s3.cjs');
@@ -14,7 +15,7 @@ const { collectUploads, downloadEntries } = require('../electron/files.cjs');
 const { createS3Fixture } = require('./s3-fixture.cjs');
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  taskManager.clear();
+  await taskManager.clear();
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 
@@ -316,6 +317,76 @@ describe('S3 connection boundaries', () => {
   });
 });
 describe('S3 protocol through the actual AWS SDK and a local HTTP endpoint', () => {
+  it('returns safe object metadata and generates the same unsigned address as the SDK', async () => {
+    const { connection, provider, server } = await fixture({ basePath: '/proxy/s3' });
+    const info = await provider.objectInfo(connection, server.bucket, 'hello.json');
+    expect(info).toMatchObject({
+      size: server.objects.get('hello.json').length,
+      contentType: 'application/octet-stream',
+      cacheControl: 'public, max-age=3600',
+      contentDisposition: 'inline',
+      metadata: { project: 'fixture-project' },
+    });
+    expect(JSON.stringify(info)).not.toContain('fixture-token');
+    const key = '目录/a b+#?%.txt';
+    const signed = await provider.signedUrl(connection, server.bucket, key, 900);
+    expect(objectAddress(connection, server.bucket, key).httpUrl).toBe(signed.split('?')[0]);
+    const virtual = {
+      ...connection,
+      endpoint: 'https://storage.example.com:9443/proxy',
+      forcePathStyle: false,
+    };
+    expect(objectAddress(virtual, server.bucket, key).httpUrl).toBe(
+      (await provider.signedUrl(virtual, server.bucket, key, 900)).split('?')[0],
+    );
+  });
+  it('generates signed GET links with the configured endpoint, token and expiration', async () => {
+    const { connection, provider, server } = await fixture({ basePath: '/proxy/s3' });
+    const url = new URL(
+      await provider.signedUrl(connection, server.bucket, '目录/中文 file.txt', 900),
+    );
+    expect(url.pathname).toBe(
+      '/proxy/s3/media.bucket/%E7%9B%AE%E5%BD%95/%E4%B8%AD%E6%96%87%20file.txt',
+    );
+    expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
+    expect(url.searchParams.get('X-Amz-Security-Token')).toBe('fixture-token');
+    expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[a-f0-9]{64}$/);
+    expect(url.toString()).not.toContain('fixture-secret');
+  });
+  it('pauses multipart uploads and continues with the same upload ID without resending completed parts', async () => {
+    const { server, connection, provider } = await fixture();
+    const dir = await directory();
+    const file = path.join(dir, 'resume.bin');
+    await fs.writeFile(file, Buffer.alloc(17 * 1024 ** 2, 71));
+    let id = '',
+      paused = false;
+    await provider.upload(connection, server.bucket, '', [{ path: file }], (task: any) => {
+      id = task.id;
+      if (!paused && task.progress > 0 && task.status === 'running') {
+        paused = true;
+        taskManager.pause(id);
+      }
+    });
+    const task = taskManager.records.get(id);
+    expect(task.metadata.status).toBe('paused');
+    expect(server.uploads.size).toBe(1);
+    const checkpoint = task.descriptor.state.checkpoint;
+    const done = checkpoint.doneParts.map((part: any) => part.PartNumber);
+    expect(done.length).toBeGreaterThan(0);
+    const before = server.requests.length;
+    expect((await taskManager.retry(id)).status).toBe('completed');
+    expect(
+      server.requests.filter((request: any) => request.query.uploads !== undefined),
+    ).toHaveLength(1);
+    expect(
+      server.requests
+        .slice(before)
+        .filter((request: any) => request.query.partNumber)
+        .every((request: any) => !done.includes(Number(request.query.partNumber))),
+    ).toBe(true);
+    expect(server.objects.get('resume.bin').equals(Buffer.alloc(17 * 1024 ** 2, 71))).toBe(true);
+    expect(server.uploads.size).toBe(0);
+  });
   it('lists buckets, signed requests, folders and paginated recursive search', async () => {
     const { server, connection, provider } = await fixture({ pageSize: 1 });
     expect((await provider.buckets(connection))[0].name).toBe('media.bucket');

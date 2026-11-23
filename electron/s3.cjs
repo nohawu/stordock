@@ -15,6 +15,7 @@ const {
 } = require('@aws-sdk/client-s3');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { Readable } = require('node:stream');
 const { Agent: HttpAgent } = require('node:http');
 const { Agent: HttpsAgent } = require('node:https');
@@ -103,21 +104,56 @@ function adapter(connection, bucket, makeClient) {
         nextContinuationToken: result.NextContinuationToken,
       };
     },
-    async head(key) {
-      const result = await sdk.send(new HeadObjectCommand({ Bucket, Key: key }));
+    async head(key, options = {}) {
+      const result = await sdk.send(
+        new HeadObjectCommand({ Bucket, Key: key, VersionId: options.versionId }),
+      );
       return {
-        res: { headers: { 'content-length': String(result.ContentLength), etag: result.ETag } },
+        res: {
+          headers: {
+            'content-length': String(result.ContentLength),
+            etag: result.ETag,
+            'last-modified': result.LastModified?.toUTCString(),
+            'content-type': result.ContentType,
+            'cache-control': result.CacheControl,
+            'content-disposition': result.ContentDisposition,
+            'content-encoding': result.ContentEncoding,
+            'content-language': result.ContentLanguage,
+            expires: result.Expires?.toUTCString(),
+            'x-amz-version-id': result.VersionId,
+            'x-amz-storage-class': result.StorageClass || 'Standard',
+            'x-amz-restore': result.Restore,
+            ...Object.fromEntries(
+              Object.entries(result.Metadata || {}).map(([name, value]) => [
+                `x-amz-meta-${name}`,
+                value,
+              ]),
+            ),
+          },
+        },
       };
     },
     async getStream(key, options = {}) {
       const result = await sdk.send(
-        new GetObjectCommand({ Bucket, Key: key, Range: options.headers?.Range }),
+        new GetObjectCommand({
+          Bucket,
+          Key: key,
+          Range: options.headers?.Range,
+          VersionId: options.versionId,
+          IfMatch: options.headers?.['If-Match'],
+        }),
         { abortSignal: options.signal },
       );
       if (!result.Body && result.ContentLength !== 0) throw new Error('服务未返回文件内容');
       return {
         stream: result.Body || Readable.from([]),
-        res: { headers: { 'content-length': String(result.ContentLength) } },
+        res: {
+          headers: {
+            'content-length': String(result.ContentLength),
+            etag: result.ETag,
+            'content-range': result.ContentRange,
+          },
+        },
       };
     },
     async put(key, file, options = {}) {
@@ -129,8 +165,14 @@ function adapter(connection, bucket, makeClient) {
           Key: key,
           Body: body,
           ContentLength: body.length,
-          ContentType: contentType(key),
+          ContentType: options.headers?.['Content-Type'] || contentType(key),
+          CacheControl: options.headers?.['Cache-Control'],
+          ContentDisposition: options.headers?.['Content-Disposition'],
+          ContentEncoding: options.headers?.['Content-Encoding'],
+          ContentLanguage: options.headers?.['Content-Language'],
+          Metadata: options.meta,
           IfNoneMatch: options.headers?.['x-oss-forbid-overwrite'] === 'true' ? '*' : undefined,
+          IfMatch: options.headers?.['If-Match'],
         }),
         { abortSignal: options.signal },
       );
@@ -201,21 +243,38 @@ function adapter(connection, bucket, makeClient) {
       const MiB = 1024 * 1024;
       const partSize = Math.max(8 * MiB, Math.ceil(size / 10000 / MiB) * MiB);
       if (partSize > 5 * 1024 * MiB) throw new Error('文件超出 S3 分片上传大小限制');
-      const initiated = await sdk.send(
-        new CreateMultipartUploadCommand({ Bucket, Key: key, ContentType: contentType(key) }),
-        { abortSignal: options.signal },
-      );
+      const initiated = options.checkpoint?.uploadId
+        ? { UploadId: options.checkpoint.uploadId }
+        : await sdk.send(
+            new CreateMultipartUploadCommand({
+              Bucket,
+              Key: key,
+              ContentType: options.headers?.['Content-Type'] || contentType(key),
+              CacheControl: options.headers?.['Cache-Control'],
+              ContentDisposition: options.headers?.['Content-Disposition'],
+              ContentEncoding: options.headers?.['Content-Encoding'],
+              ContentLanguage: options.headers?.['Content-Language'],
+              Metadata: options.meta,
+            }),
+            { abortSignal: options.signal },
+          );
       const UploadId = initiated.UploadId;
       if (!UploadId) throw new Error('服务未返回分片上传 ID');
-      const parts = [];
+      const checkpoint = options.checkpoint || { uploadId: UploadId, doneParts: [] };
+      const parts = checkpoint.doneParts.map((part) => ({ ...part }));
       let next = 1,
-        completedBytes = 0;
+        completedBytes = parts.reduce(
+          (sum, part) => sum + Math.min(partSize, size - (part.PartNumber - 1) * partSize),
+          0,
+        );
       const partCount = Math.max(1, Math.ceil(size / partSize));
       let failed;
       try {
+        await options.progress?.(Math.min(0.99, completedBytes / size), checkpoint);
         const worker = async () => {
           while (!failed && next <= partCount) {
             const PartNumber = next++;
+            if (parts.some((part) => part.PartNumber === PartNumber)) continue;
             const start = (PartNumber - 1) * partSize;
             const length = Math.min(partSize, size - start);
             const body = fs.createReadStream(file, { start, end: start + length - 1 });
@@ -233,8 +292,9 @@ function adapter(connection, bucket, makeClient) {
               );
               if (!result.ETag) throw new Error('服务未返回分片 ETag');
               parts.push({ PartNumber, ETag: result.ETag });
+              checkpoint.doneParts = parts.map((part) => ({ ...part }));
               completedBytes += length;
-              await options.progress?.(Math.min(0.99, completedBytes / size));
+              await options.progress?.(Math.min(0.99, completedBytes / size), checkpoint);
             } catch (error) {
               failed = error;
               throw error;
@@ -256,22 +316,36 @@ function adapter(connection, bucket, makeClient) {
             UploadId,
             MultipartUpload: { Parts: parts.sort((a, b) => a.PartNumber - b.PartNumber) },
             IfNoneMatch: options.headers?.['x-oss-forbid-overwrite'] === 'true' ? '*' : undefined,
+            IfMatch: options.headers?.['If-Match'],
           }),
           { abortSignal: options.signal },
         );
       } catch (error) {
+        if (options.preserveCheckpoint?.(error)) throw error;
         try {
           await sdk.send(new AbortMultipartUploadCommand({ Bucket, Key: key, UploadId }));
         } catch {
-          throw new Error('上传失败且未能清理分片，请检查服务端未完成的分片上传');
+          throw Object.assign(new Error('上传失败且未能清理分片，请检查服务端未完成的分片上传'), {
+            cleanupFailed: true,
+          });
         }
         throw error;
       }
+    },
+    async abortMultipartUpload(key, uploadId) {
+      await sdk.send(new AbortMultipartUploadCommand({ Bucket, Key: key, UploadId: uploadId }));
     },
   };
 }
 // Reuse bounded preview, streaming downloads, transfer progress and directory semantics.
 class S3Provider extends AliyunProvider {
+  async signedUrl(connection, bucket, key, expires) {
+    return getSignedUrl(
+      this.s3Client(connection),
+      new GetObjectCommand({ Bucket: bucket, Key: key }),
+      { expiresIn: expires },
+    );
+  }
   async buckets(connection) {
     const sdk = this.client(connection);
     if (connection.bucket) {
@@ -296,6 +370,7 @@ class S3Provider extends AliyunProvider {
 
   constructor(makeClient = createS3Client) {
     super((connection, bucket) => adapter(connection, bucket, makeClient));
+    this.s3Client = makeClient;
   }
 }
 module.exports = { S3Provider, createS3Client };

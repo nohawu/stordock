@@ -2,7 +2,7 @@ const { randomUUID } = require('node:crypto');
 
 const { validateConnection, validateBucket } = require('./connection.cjs');
 function publicConnection(connection) {
-  const { accessKeySecret, stsToken, remember, ...metadata } = connection;
+  const { accessKeySecret, stsToken, credentialRefreshToken, remember, ...metadata } = connection;
   return { ...metadata, hasSecret: true, temporary: !remember };
 }
 function validateFolder(name) {

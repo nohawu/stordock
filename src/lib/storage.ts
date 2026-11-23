@@ -9,6 +9,7 @@ function native() {
 }
 const isDemo = (id: string) => id === DEMO_ID;
 export const storage: StorageBridge = {
+  feature: (action, input) => native().feature(action, input),
   async connections() {
     return [demoConnection, ...(window.ossDesk ? await window.ossDesk.connections() : [])];
   },
@@ -19,6 +20,9 @@ export const storage: StorageBridge = {
   list: (request) => (isDemo(request.connectionId) ? demo.list(request) : native().list(request)),
   preview: (id, bucket, object) =>
     isDemo(id) ? demo.preview(id, bucket, object) : native().preview(id, bucket, object),
+  objectInfo: (id, bucket, key) =>
+    isDemo(id) ? demo.objectInfo(id, bucket, key) : native().objectInfo(id, bucket, key),
+  signedUrl: (id, bucket, key, expires) => native().signedUrl(id, bucket, key, expires),
   pickUpload: (mode) => native().pickUpload(mode),
   upload: (id, bucket, prefix, items, conflict) =>
     isDemo(id)
@@ -35,9 +39,19 @@ export const storage: StorageBridge = {
       ? demo.prepareOperation(id, bucket, objects, operation, target)
       : native().prepareOperation(id, bucket, objects, operation, target),
   executeOperation: (planId) =>
-    planId.startsWith('demo-') ? demo.executeOperation(planId) : native().executeOperation(planId),
+    planId.startsWith('demo-')
+      ? demo.executeOperation(planId)
+      : planId.startsWith('migration-')
+        ? native().feature('migration:execute', { planId })
+        : native().executeOperation(planId),
   cancelTransfer: (id) =>
     id.startsWith('demo-') ? demo.cancelTransfer(id) : native().cancelTransfer(id),
+  pauseTransfer: (id) => native().pauseTransfer(id),
+  listTransfers: () => (window.ossDesk ? window.ossDesk.listTransfers() : Promise.resolve([])),
+  getTransferConcurrency: () =>
+    window.ossDesk ? window.ossDesk.getTransferConcurrency() : Promise.resolve(3),
+  setTransferConcurrency: (value) => native().setTransferConcurrency(value),
+  revealTransfer: (id) => native().revealTransfer(id),
   retryTransfer: (id) =>
     id.startsWith('demo-') ? demo.retryTransfer(id) : native().retryTransfer(id),
   clearTransfers: async () => {

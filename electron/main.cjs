@@ -7,8 +7,11 @@ const {
   net,
   session,
   nativeTheme,
+  shell,
+  clipboard,
 } = require('electron');
 const path = require('node:path');
+const fsp = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { ConnectionVault } = require('./vault.cjs');
 const { validateConnection, validateBucket, safeFilename, ensureKey } = require('./core.cjs');
@@ -18,14 +21,21 @@ const { taskManager } = require('./tasks.cjs');
 const { collectUploads, downloadEntries } = require('./files.cjs');
 const { expandObjects } = require('./operations.cjs');
 const { randomUUID } = require('node:crypto');
+const { CredentialRefresh } = require('./credentials.cjs');
+const { setupFeatures } = require('./features.cjs');
+const { setupUpdates } = require('./updates.cjs');
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'ossdesk', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 if (!app.isPackaged && process.env.OSS_DESK_TEST_DATA)
   app.setPath('userData', process.env.OSS_DESK_TEST_DATA);
+const profileDirectory = app.commandLine.getSwitchValue('user-data-dir');
+if (profileDirectory && path.isAbsolute(profileDirectory))
+  app.setPath('userData', profileDirectory);
 let mainWindow;
 let vault;
+let refresh;
 const uploadGrants = new Set();
 const bucketRegions = new Map();
 const operationPlans = new Map();
@@ -64,7 +74,7 @@ function handle(channel, handler) {
   });
 }
 async function connectionFor(id, bucket) {
-  const connection = await vault.get(id);
+  const connection = await refresh.get(id);
   validateBucket(bucket, connection.provider || 'aliyun');
   if (connection.bucket && connection.bucket !== bucket)
     throw new Error('此连接仅允许访问配置的 Bucket');
@@ -76,6 +86,11 @@ function emit(transfer) {
     mainWindow.webContents.send('transfer:progress', transfer);
 }
 function setupHandlers() {
+  handle('clipboard:write', async (value) => {
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 1024 * 1024)
+      throw new Error('复制内容无效或超出 1 MB 限制');
+    await clipboard.writeText(value);
+  });
   async function connectionInput(input) {
     if (input?.id && input.keepCredentials) {
       const previous = await vault.get(input.id);
@@ -85,6 +100,11 @@ function setupHandlers() {
       input = {
         ...input,
         accessKeySecret: input.accessKeySecret || (sameIdentity ? previous.accessKeySecret : ''),
+        credentialRefreshToken:
+          input.credentialRefreshToken ||
+          (input.credentialRefreshUrl === previous.credentialRefreshUrl
+            ? previous.credentialRefreshToken
+            : ''),
         stsToken: input.clearStsToken
           ? ''
           : input.stsToken || (sameIdentity ? previous.stsToken : ''),
@@ -106,22 +126,25 @@ function setupHandlers() {
   handle('connections:list', () => vault.list());
   handle('connections:save', (input) =>
     serialize(async () => {
-      const connection = await connectionInput(input);
+      let connection = await connectionInput(input);
+      if (connection.credentialRefreshUrl) connection = await refresh.refresh(connection, false);
       await providerFor(connection).buckets(connection);
       for (const [key, value] of operationPlans)
         if (value.id === connection.id) operationPlans.delete(key);
       for (const key of bucketRegions.keys())
         if (key.startsWith(connection.id + '/')) bucketRegions.delete(key);
+      refresh.invalidate(connection.id);
       return vault.save(connection);
     }),
   );
   handle('connections:test', async (input) => {
-    const connection = await connectionInput(input);
+    let connection = await connectionInput(input);
+    if (connection.credentialRefreshUrl) connection = await refresh.refresh(connection, false);
     return { buckets: await providerFor(connection).buckets(connection) };
   });
   handle('connections:remove', (id) => serialize(() => vault.remove(id)));
   handle('storage:buckets', async (id) => {
-    const connection = await vault.get(id);
+    const connection = await refresh.get(id);
     return rememberBuckets(id, await providerFor(connection).buckets(connection));
   });
   handle('storage:list', async (request) => {
@@ -139,6 +162,25 @@ function setupHandlers() {
   handle('storage:preview', async (id, bucket, object) => {
     const connection = await connectionFor(id, bucket);
     return providerFor(connection).preview(connection, bucket, object);
+  });
+  handle('storage:object-info', async (id, bucket, key) => {
+    const connection = await connectionFor(id, bucket);
+    ensureKey(key, connection.provider === 's3' ? 1024 : 1023);
+    return providerFor(connection).objectInfo(connection, bucket, key);
+  });
+  handle('storage:signed-url', async (id, bucket, key, expires) => {
+    if (
+      !Number.isInteger(expires) ||
+      expires < 60 ||
+      expires > 604800 ||
+      typeof key !== 'string' ||
+      key.endsWith('/')
+    )
+      throw new Error('请选择文件，有效期应为 1 分钟至 7 天');
+    const connection = await connectionFor(id, bucket);
+    ensureKey(key, connection.provider === 's3' ? 1024 : 1023);
+    const url = await providerFor(connection).signedUrl(connection, bucket, key, expires);
+    return { url, expiresAt: Date.now() + expires * 1000 };
   });
   handle('storage:folder', async (id, bucket, prefix, name) => {
     if (typeof prefix !== 'string') throw new Error('目录路径无效');
@@ -219,6 +261,39 @@ function setupHandlers() {
         );
     }
   });
+  handle('files:save-demo-download', async (bucket, key, content) => {
+    validateBucket(bucket);
+    ensureKey(key, 1024);
+    if (!(content instanceof ArrayBuffer) || content.byteLength > 2 * 1024 * 1024)
+      throw new Error('演示下载内容无效或超过 2 MB');
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '保存文件',
+      defaultPath: safeFilename(key),
+    });
+    if (result.canceled || !result.filePath) return;
+    await taskManager.run(
+      {
+        name: safeFilename(key),
+        direction: 'download',
+        size: content.byteLength,
+        bucket,
+        canPause: false,
+      },
+      async (signal, report) => {
+        signal.throwIfAborted();
+        const temporary = path.join(path.dirname(result.filePath), `.ossdesk-${randomUUID()}.part`);
+        try {
+          await fsp.writeFile(temporary, Buffer.from(content), { flag: 'wx', signal });
+          signal.throwIfAborted();
+          await fsp.rename(temporary, result.filePath);
+          report({ localPath: result.filePath });
+        } finally {
+          await fsp.rm(temporary, { force: true });
+        }
+      },
+      emit,
+    );
+  });
   handle('storage:prepare-operation', async (id, bucket, objects, operation, target) => {
     const connection = await connectionFor(id, bucket);
     const plan = await providerFor(connection).prepareOperation(
@@ -244,10 +319,30 @@ function setupHandlers() {
     return providerFor(connection).executeOperation(connection, prepared.plan, emit);
   });
   handle('transfer:cancel', (id) => taskManager.cancel(id));
+  handle('transfer:pause', (id) => taskManager.pause(id));
+  handle('transfer:list', () => taskManager.list());
+  handle('transfer:concurrency', (value) =>
+    value === undefined ? taskManager.concurrency : taskManager.configureConcurrency(value),
+  );
+  handle('transfer:reveal', async (id) => {
+    const task = taskManager.records.get(id);
+    if (
+      task?.metadata.direction !== 'download' ||
+      task.metadata.status !== 'completed' ||
+      !task.metadata.localPath
+    )
+      throw new Error('此任务没有已保存的本地文件');
+    await fsp.access(task.metadata.localPath);
+    if (task.descriptor?.object?.kind === 'folder') {
+      const error = await shell.openPath(task.metadata.localPath);
+      if (error) throw new Error('无法打开保存目录，请检查目录是否存在');
+    } else shell.showItemInFolder(task.metadata.localPath);
+  });
   handle('transfer:retry', async (id) => {
     const task = taskManager.records.get(id);
     if (!task) throw new Error('任务记录已清除');
-    await connectionFor(task.metadata.connectionId, task.metadata.bucket);
+    if (task.metadata.connectionId)
+      await connectionFor(task.metadata.connectionId, task.metadata.bucket);
     return taskManager.retry(id);
   });
   handle('transfer:clear', () => taskManager.clear());
@@ -297,12 +392,96 @@ app.whenReady().then(async () => {
     callback(false),
   );
   vault = new ConnectionVault(app.getPath('userData'), require('electron').safeStorage);
+  refresh = new CredentialRefresh(vault);
+  await taskManager.initialize(
+    app.getPath('userData'),
+    async (task) => {
+      const descriptor = task.descriptor;
+      const connection = await connectionFor(task.metadata.connectionId, descriptor.bucket);
+      const identity = descriptor.connection;
+      if (
+        !identity ||
+        (connection.provider || 'aliyun') !== identity.provider ||
+        connection.endpoint !== identity.endpoint ||
+        connection.bucket !== identity.bucket
+      )
+        throw new Error('连接目标已更改，请重新选择文件或保存位置');
+      connection.region = identity.region;
+      const provider = providerFor(connection);
+      if (descriptor.type === 'upload')
+        return provider.upload(
+          connection,
+          descriptor.bucket,
+          descriptor.prefix,
+          [descriptor.item],
+          emit,
+          descriptor.conflict,
+          task,
+        );
+      if (descriptor.type === 'download')
+        return provider.download(
+          connection,
+          descriptor.bucket,
+          [descriptor.object],
+          descriptor.destination,
+          emit,
+          descriptor.batch,
+          task,
+        );
+      throw new Error('此任务无法恢复，请重新操作');
+    },
+    emit,
+  );
+  taskManager.cleanup = async (task) => {
+    const descriptor = task.descriptor;
+    if (!descriptor?.state?.checkpoint && !descriptor?.state?.temporary) return;
+    const connection = await connectionFor(task.metadata.connectionId, descriptor.bucket);
+    const identity = descriptor.connection;
+    if (
+      !identity ||
+      (connection.provider || 'aliyun') !== identity.provider ||
+      connection.endpoint !== identity.endpoint ||
+      connection.bucket !== identity.bucket
+    )
+      throw new Error('连接目标已更改，无法清理原任务，请先恢复原连接配置');
+    await providerFor(connection).cleanupTransfer(
+      { ...connection, region: identity.region },
+      descriptor,
+    );
+  };
   setupHandlers();
+  setupFeatures(handle, {
+    vault,
+    refresh,
+    connectionFor,
+    providerFor,
+    emit,
+    dialog,
+    window: () => mainWindow,
+    serialize,
+    updates: setupUpdates(app),
+  });
   await createWindow();
+  if (taskManager.recoveryWarning)
+    void dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '无法恢复历史任务',
+      message: taskManager.recoveryWarning,
+    });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+let quitting = false;
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  taskManager.shutdown().then(
+    () => app.quit(),
+    () => app.quit(),
+  );
 });

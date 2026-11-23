@@ -2,9 +2,10 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { safeFilename } = require('./core.cjs');
 const { validateRelativePath, deduplicateObjects } = require('./operations.cjs');
-async function collectUploads(paths) {
+async function collectUploads(paths, options = {}) {
   const items = [];
   async function visit(filePath, relativePath) {
+    if (options.ignore?.(relativePath)) return;
     const stat = await fs.lstat(filePath);
     if (stat.isSymbolicLink()) throw new Error('上传目录中包含符号链接，请移除后重试');
     if (stat.isDirectory()) {

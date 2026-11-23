@@ -2622,3 +2622,247 @@ button {
   color: var(--muted);
   margin-left: auto;
 }
+.directory-row {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  border-radius: 3px;
+}
+.directory-row:hover {
+  background: var(--hover);
+}
+.directory-row.active {
+  background: var(--selected);
+}
+.directory-toggle {
+  width: 20px;
+  height: 28px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.directory-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  text-align: left;
+  color: var(--secondary);
+  font-size: 12px;
+  padding-right: 5px;
+}
+.directory-name > svg {
+  color: #ca9a12;
+  flex-shrink: 0;
+}
+.directory-name > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.directory-message {
+  display: block;
+  margin-left: 20px;
+  padding: 7px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+}
+.transfer-actions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.transfer-detail small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transfer-filename {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  font-weight: inherit;
+  text-align: left;
+}
+.transfer-filename:hover {
+  text-decoration: underline;
+}
+.share-result {
+  margin-top: 16px;
+}
+.share-result textarea {
+  width: 100%;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.7;
+  padding: 8px;
+  border: 1px solid var(--input);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface);
+}
+.transfer-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.transfer-controls label {
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+.transfer-controls select {
+  border: 1px solid var(--input);
+  border-radius: 4px;
+  padding: 5px 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.reveal-download {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  color: var(--secondary);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.exact-file-size {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 3px;
+}
+.object-info-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.object-info-error {
+  color: var(--danger);
+  font-size: 11px;
+  margin-top: 14px;
+  overflow-wrap: anywhere;
+}
+.object-info-error .button {
+  margin-top: 8px;
+}
+.object-custom-metadata {
+  margin-top: 22px;
+}
+.feature-tabs {
+  margin-bottom: 18px;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.feature-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.version-list,
+.sync-plan {
+  max-height: 310px;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.version-row {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.version-row > code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.version-row > small {
+  display: block;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.feature-confirm {
+  padding: 12px;
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font-size: 12px;
+}
+.archive-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+}
+.sync-plan > div {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 60px;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+.sync-plan code {
+  overflow-wrap: anywhere;
+}
+.sync-plan small {
+  text-align: right;
+  color: var(--muted);
+}
+.bookmarks {
+  padding: 9px 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+.bookmarks .section-label {
+  margin-bottom: 7px;
+}
+.bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 3px;
+}
+.bookmark-row:hover {
+  background: var(--hover);
+}
+.bookmark-row > button:first-child {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+}
+.bookmark-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bookmark-row svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.update-controls {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
